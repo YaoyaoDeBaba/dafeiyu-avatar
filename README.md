@@ -152,10 +152,47 @@ pnpm add file:D:/dafeiyu-market/dsh-avatar
 
 ---
 
-## 5. 设置面板怎么接
+## 5. 设置页「形象」房间（大肥鱼 .84 房间注册制）
 
-`src/client/panel.ts` 导出 `buildAvatarPanel({ createElement, hooks })`，与本体设置页里那格用法一致。
-当前**未自动注册**（设置页那一格仍在本体 `dafeiyu-page.ts` 里）；等本体把设置页做成可插拔，或由本体按需 import 本包的客户端产物再调用。
+宿主（`dsh-remote-dafeiyu` ≥ .84）把设置页改成**房间管理器**：谁注册谁有 tab，宿主负责建房、切换、收房。
+本包用 `id: 'avatar'` 领一间房，内容自己渲染（**纯 DOM，不依赖 React**，见 `src/client/room.ts`）。
+
+```ts
+// 宿主最前面同步建注册表并派发 dafeiyu:rooms-ready
+const host = await waitForRooms(1500)     // 拿不到 = 宿主版本旧 → 静默放弃，不报错
+host?.register({
+  id: 'avatar',
+  label: '形象',
+  order: 10,
+  mount(container) {
+    // 建 UI + 起 24fps 播放器；返回的清理函数必须干净
+    return () => {
+      clearInterval(timer)
+      container.replaceChildren()
+    }
+  },
+})
+```
+
+**旧方案已废弃**：不再需要 `dafeiyu-avatar-slot` 容器，也不再有 `data-filled` 标记。
+`src/client/panel.ts` 是原来的 React 版面板，保留作参考；房间用的是 `room.ts`。
+
+### 清理怎么自证
+
+`mount` 里会维护一个计数器，宿主/验收可以直接读：
+
+```js
+window.__dafeiyuAvatarRoomStats   // { mounted, disposed, timerAlive }
+```
+
+切走 tab 后应满足：`disposed` 增加、`timerAlive === false`。
+
+### 房间相关的验收（在 §2.3 之上加）
+
+- [ ] **装了**：设置页有「形象」tab，内容是本包渲染的；能播；切走再切回**不叠两份、不卡**；
+- [ ] **没装**：设置页**没有**「形象」tab（宿主只为已注册的房间建 tab）；
+- [ ] **mount 抛错**：页面显示「这个模块起不来：形象（…）」，其它 tab 正常；
+- [ ] **切走 tab 后**：`window.__dafeiyuAvatarRoomStats.timerAlive === false` 且 `disposed` +1。
 
 ---
 

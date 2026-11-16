@@ -9,6 +9,7 @@
  */
 import { resolveHostUrl } from './host-url.js'
 import { mountAvatarWidget } from './widget.js'
+import { registerAvatarRoom } from './room.js'
 
 export const name = 'dsh-avatar-dafeiyu'
 
@@ -87,11 +88,26 @@ export function apply(ctx: ClientContext): (() => void) | void {
   } catch (error) {
     swallow('avatar widget mount failed (swallowed)', error)
   }
+
+  // 设置页「形象」房间（大肥鱼 .84 的房间注册制）。
+  // 宿主版本旧、没有注册表时 registerAvatarRoom() 静默返回 undefined —— 不算故障。
+  let room: { stop: () => void } | undefined
+  void registerAvatarRoom()
+    .then((handle) => {
+      room = handle
+    })
+    .catch((error: unknown) => swallow('avatar room register failed (swallowed)', error))
+
   return () => {
     try {
       cleanup?.()
     } catch {
       /* cleanup 不许抛 */
+    }
+    try {
+      room?.stop()
+    } catch {
+      /* unregister 不许抛 */
     }
   }
 }
