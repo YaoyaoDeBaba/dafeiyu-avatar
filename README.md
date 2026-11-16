@@ -23,15 +23,74 @@
 
 ## 2. 安装
 
-```bash
-# 装进 profile（和本体并列）
-pnpm add file:D:/path/to/dsh-avatar        # 或 npm i
-# 然后 profile 的依赖里加一条，重启宿主
+### 2.1 装进 DSH profile（推荐：跟本体一样走 git 依赖）
+
+profile 目录形如 `<DSH_HOME>/profiles/desktop/`（`<DSH_HOME>` 默认 `~/.dsh`，Windows 是 `C:\Users\<你>\.dsh`）。
+
+**① 在 profile 的 `package.json` 里加依赖**
+
+```jsonc
+{
+  "dependencies": {
+    "dsh-remote-dafeiyu": "git+https://github.com/YaoyaoDeBaba/dsh-remote-dafeiyu.git#<sha>",  // 本体，照旧
+    "dsh-avatar-dafeiyu": "git+https://github.com/YaoyaoDeBaba/dafeiyu-avatar.git#5a2b08f"       // ← 新增
+  },
+  "dsh": {
+    "profile": {
+      "bundles": [
+        "@deepseek-ai/dsh-base",
+        "@deepseek-ai/dsh-web-app",
+        "dsh-persona-dafeiyu",
+        "dsh-capability-panel",
+        "dsh-remote-dafeiyu",        // 本体：拆包完成前保留；完成后删
+        "dsh-avatar-dafeiyu",        // ← 新增（**必须在这里出现，只写 dependencies 不会加载**）
+        "@deepseek-ai/dsh-experimental-plugin-market-bundle",
+        "dsh-selfloop"
+      ]
+    }
+  }
+}
 ```
 
-或直接把 `dist/bundle/index.js`（宿主）+ `dist/bundle/client.cjs`（浏览器）交给 profile 的 bundles。
+> 两条都要：`dependencies` 决定"装不装得上"，`dsh.profile.bundles` 决定"加不加载"。只加前者 = 文件在、插件不出现。
 
-**升级顺序**：先装这个包并确认形象在，再让本体删掉 `src/avatar/**` 与两个 client 文件——反过来的话中间会出现"两边都没有形象"的窗口。
+**② 安装并重启**
+
+```bash
+cd <DSH_HOME>/profiles/desktop
+pnpm install                     # 或 npm i
+# 重启 DSH（插件包在宿主启动时加载，热重载不覆盖 bundles 变更）
+```
+
+**③ 本地开发时用 file: 依赖**
+
+```bash
+# 改完本仓库后，直接让 profile 指向工作副本
+pnpm add file:D:/dafeiyu-market/dsh-avatar
+```
+
+### 2.2 不装 npm 包、直接放产物
+
+把 `dist/bundle/`（`index.js` + `client.cjs`）+ `cordis.patch.yml` + `package.json` 拷到 profile 的 `node_modules/dsh-avatar-dafeiyu/` 下，也要在 `dsh.profile.bundles` 里加包名。适合临时验证。
+
+### 2.3 装完的验收清单（**逐条打勾再交给下游**）
+
+- [ ] 聊天页左下角**形象在**，且能连续播满一套动作再循环（不是播一帧就跳）；
+- [ ] `GET /api/dsh-remote-dafeiyu/avatar/manifest` 返回 `{ ok:true, manifest:{ version:53, states:[19 条] } }`；
+- [ ] 素材没装时，同一路由返回 `manifest:null` 而不是 500；
+- [ ] `plugin_manager` 里 `include:avatar-dafeiyu` 的 **`fiberPhase` 是 `active`**（这条比"看起来能用"硬）；
+- [ ] 我干活（agent `running`）时形象切到 `boss_point` / `boss_whistle`；
+- [ ] 同时在母体周围出现 2 个工地鱼，跑动 ↔（打螺丝/砌砖/张望）交替；停手后消失；
+- [ ] 刷新页面后形象仍在（客户端 bundle 若被宿主缓存，需重启一次）。
+
+### 2.4 升级顺序（**别反**）
+
+1. 先装形象包、按 §2.3 验收通过；
+2. 再让本体删 `src/avatar/**` 与 `src/client/avatar-widget.ts`、`src/client/avatar-panel.ts`；
+3. 本体删完再发一版。
+
+反过来的话，中间那段时间会出现"**两边都没有形象**"的窗口（本体删了、形象包还没装上）。
+
 
 ---
 
