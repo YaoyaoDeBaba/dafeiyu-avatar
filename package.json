@@ -1,0 +1,45 @@
+{
+  "name": "dsh-avatar-dafeiyu",
+  "version": "0.1.0",
+  "description": "大肥鱼-形象（独立插件）：悬浮形象、形象设置面板、图集素材只读路由。素材目录与 schema 与大肥鱼本体共用。",
+  "type": "module",
+  "license": "MIT",
+  "main": "./dist/bundle/index.js",
+  "exports": {
+    ".": "./dist/bundle/index.js",
+    "./client": "./dist/bundle/client.cjs",
+    "./cordis.patch.yml": "./cordis.patch.yml",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "dist/bundle",
+    "cordis.patch.yml"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "immediately": true,
+      "inject": [
+        "@deepseek-ai/dsh-client-ui-renderer",
+        "@deepseek-ai/dsh-client-locale"
+      ]
+    }
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "clean": "node --input-type=module -e \"import { rmSync } from 'node:fs'; rmSync('dist', { recursive: true, force: true })\"",
+    "typecheck": "tsc --noEmit -p tsconfig.json && tsc -p tsconfig.client.json",
+    "build": "node .bin-build.mjs",
+    "test": "npm run build && node --test \"dist/tests/*.test.js\""
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.3",
+    "esbuild": "^0.28.2",
+    "typescript": "^5.6.3"
+  }
+}
