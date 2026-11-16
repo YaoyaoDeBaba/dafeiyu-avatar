@@ -455,12 +455,24 @@ export function mountAvatarWidget(deps: AvatarWidgetDeps): () => void {
 
   /* ───────────────── 子代理工地鱼集群 ───────────────── */
 
+  /**
+   * 位置模型：工人存的是**相对母体锚点的偏移**（offsetX/offsetY），不是屏幕绝对坐标。
+   *
+   * 为什么这么定（2026-11-16 修）：早先用"spawn 时的绝对基准 + 随机偏移"，
+   * 跟随把绝对坐标挪走之后，下一轮 wander 又按旧基准算 ⇒ 人会被拉回原点。
+   * 改成偏移量以后：母体动 ⇒ 所有工人自动跟着动（偏移不变）；wander 只改偏移。
+   */
   interface SwarmWorker {
     node: HTMLDivElement
-    /** 锚点要落到的屏幕坐标（≈ 角色脚底基线）。 */
-    targetX: number
-    targetY: number
+    /** 相对母体锚点（舞台内 ANCHOR_SCREEN_X/Y）的偏移，px。 */
+    offsetX: number
+    offsetY: number
     facing: 1 | -1
+    /** 正在干活（螺丝/砌砖/张望）——此时**不许平移**。 */
+    working: boolean
+    workTimer?: ReturnType<typeof setTimeout>
+    /** 跟随母体期间的"急行"截止时刻：这段时间用短过渡，否则会严重滞后。 */
+    rushUntil: number
     frame: number
     anchorX: number
     anchorY: number
@@ -495,18 +507,46 @@ export function mountAvatarWidget(deps: AvatarWidgetDeps): () => void {
     }
   }
 
-  /** 母体角色的"脚底基线"屏幕 y：舞台内锚点固定落在 ANCHOR_SCREEN_Y。 */
-  const mainGroundY = (): number => stage.getBoundingClientRect().top + ANCHOR_SCREEN_Y
+  /** 取元素矩形；假 DOM（单测环境）没有 getBoundingClientRect 时回落成 0 矩形。 */
+  const rectOf = (element: HTMLElement): { left: number; top: number; width: number; height: number } => {
+    try {
+      if (typeof element.getBoundingClientRect === 'function') {
+        const rect = element.getBoundingClientRect()
+        if (rect) return { left: rect.left, top: rect.top, width: rect.width, height: rect.height }
+      }
+    } catch {
+      /* ignore */
+    }
+    return { left: 0, top: 0, width: 0, height: 0 }
+  }
 
-  /** 把 target/facing 落成具体像素；翻转时用 workerLeft 补偿锚点镜像。 */
+  /** 母体锚点在屏幕上的坐标（舞台内的锚点位置固定，跟着 wrap 走）。 */
+  const mainAnchor = (): { x: number; y: number } => {
+    const rect = rectOf(stage)
+    return { x: rect.left + ANCHOR_SCREEN_X, y: rect.top + ANCHOR_SCREEN_Y }
+  }
+
+  /** 把 offset/facing 落成具体像素；翻转时用 workerLeft 补偿锚点镜像。 */
   const applyWorkerGeometry = (worker: SwarmWorker): void => {
     const cfg = swarmConfig()
+    const anchor = mainAnchor()
+    const targetX = anchor.x + worker.offsetX
+    const targetY = anchor.y + worker.offsetY
     const facing: 1 | -1 = cfg.flip ? worker.facing : 1
-    worker.node.style.left = `${workerLeft(worker.targetX, worker.anchorX, worker.width, facing)}px`
-    worker.node.style.top = `${worker.targetY - worker.anchorY * worker.height}px`
+    // 干活时**不许有 left 过渡**（否则上一次跑动的 2.6s 还在拖，看起来像原地漂移）；
+    // 跟随母体期间用短过渡；其余时候是正常的"跑过去"。
+    const rushing = Date.now() < worker.rushUntil
+    worker.node.style.transition = worker.working
+      ? 'opacity .4s ease'
+      : rushing
+        ? 'left .35s linear, top .35s linear, opacity .4s ease'
+        : 'left 2.6s linear, top .3s ease, opacity .4s ease'
+    worker.node.style.left = `${workerLeft(targetX, worker.anchorX, worker.width, facing)}px`
+    worker.node.style.top = `${targetY - worker.anchorY * worker.height}px`
+    // 翻转是瞬时的（不参与过渡）
     worker.node.style.transform = facing === -1 ? 'scaleX(-1)' : ''
     worker.node.style.zIndex = cfg.depth
-      ? depthFor(worker.targetY, mainGroundY()) === 'front'
+      ? depthFor(targetY, anchor.y) === 'front'
         ? '2147483000'
         : '2147482997'
       : '2147482998'
@@ -534,34 +574,72 @@ export function mountAvatarWidget(deps: AvatarWidgetDeps): () => void {
     applyWorkerGeometry(worker)
   }
 
-  /** 把工人挪到新的锚点坐标；朝向按本次位移判断（<1px 不动，防抖）。 */
-  const moveWorkerTo = (worker: SwarmWorker, x: number, y?: number): void => {
-    worker.facing = facingFor(worker.targetX, x, worker.facing)
-    worker.targetX = x
-    if (y !== undefined) worker.targetY = y
-    applyWorkerGeometry(worker)
+  /** 跑路：切回 worker_run，并把偏移挪一段（<1px 不改朝向，防抖）。 */
+  const runTo = (worker: SwarmWorker, deltaX: number): void => {
+    const nextX = worker.offsetX + deltaX
+    worker.facing = facingFor(worker.offsetX, nextX, worker.facing)
+    worker.offsetX = Math.max(-160, Math.min(160, nextX))
+    if (worker.working) {
+      // 打断干活：清掉待恢复的定时器
+      if (worker.workTimer) clearTimeout(worker.workTimer)
+      worker.workTimer = undefined
+      worker.working = false
+    }
+    setWorkerClip(worker, 'worker_run')
+  }
+
+  /** 读元素"当前视觉位置"的 left（过渡进行中的瞬时值），读不到就当没有。 */
+  const visualLeft = (worker: SwarmWorker): number | undefined => {
+    try {
+      const computed = (globalThis as { getComputedStyle?: (element: Element) => CSSStyleDeclaration }).getComputedStyle?.(
+        worker.node,
+      )
+      if (computed === undefined) return undefined
+      const value = Number.parseFloat(computed.left)
+      return Number.isFinite(value) ? value : undefined
+    } catch {
+      return undefined
+    }
+  }
+
+  /** 原地干活：期间**完全不动**（先把当前视觉位置落定，再贴一次且 left 无过渡）。 */
+  const startWork = (worker: SwarmWorker): void => {
+    if (worker.working) return
+    // 上一次"跑动"的 2.6s 过渡可能还没走完：先按当前视觉位置反推 offset，
+    // 否则切到电钻/搬砖时人还在继续滑（用户报的"原地漂移"就是这个）。
+    const left = visualLeft(worker)
+    if (left !== undefined) {
+      const anchor = mainAnchor()
+      const effective = worker.facing === 1 ? worker.anchorX : 1 - worker.anchorX
+      worker.offsetX = left + effective * worker.width - anchor.x
+    }
+    worker.working = true
+    setWorkerClip(worker, WORK_SWARM_CLIPS[Math.floor(Math.random() * WORK_SWARM_CLIPS.length)] ?? 'worker_run')
+    worker.workTimer = setTimeout(() => {
+      if (!worker.node.isConnected) return
+      worker.working = false
+      worker.workTimer = undefined
+      setWorkerClip(worker, 'worker_run')
+    }, 3500 + Math.random() * 2500)
   }
 
   const spawnWorker = (): void => {
     const cfg = swarmConfig()
     if (!cfg.enabled) return
-    const rect = wrap.getBoundingClientRect()
     const dir = swarm.length % 2 === 0 ? -1 : 1
     const node = doc.createElement('div')
-    // left 用 2.6s 线性做"跑动"，跟随用 .3s 短过渡；opacity 做淡入淡出
     node.style.cssText =
       'position:fixed;background-repeat:no-repeat;background-position:0 0;pointer-events:none;' +
-      'z-index:2147482998;opacity:0;will-change:left,top;' +
-      'transition:left 2.6s linear,top .3s ease,opacity .4s ease,transform .2s ease;'
-    const targetX = rect.left + rect.width / 2 + dir * (44 + Math.random() * 70)
-    const targetY = rect.top + ANCHOR_SCREEN_Y + Math.random() * 10
+      'z-index:2147482998;opacity:0;will-change:left,top;'
     doc.body.appendChild(node)
 
     const worker: SwarmWorker = {
       node,
-      targetX,
-      targetY,
+      offsetX: dir * (44 + Math.random() * 70),
+      offsetY: 4 + Math.random() * 10,
       facing: dir === -1 ? -1 : 1,
+      working: false,
+      rushUntil: 0,
       frame: 0,
       anchorX: 0.5,
       anchorY: 0.992,
@@ -570,11 +648,7 @@ export function mountAvatarWidget(deps: AvatarWidgetDeps): () => void {
     }
     swarm.push(worker)
     setWorkerClip(worker, 'worker_run')
-    // 首帧不要从 (0,0) 滑过来
-    node.style.transition = 'none'
-    applyWorkerGeometry(worker)
     requestAnimationFrame(() => {
-      node.style.transition = 'left 2.6s linear,top .3s ease,opacity .4s ease,transform .2s ease'
       node.style.opacity = '0.95'
     })
 
@@ -582,24 +656,18 @@ export function mountAvatarWidget(deps: AvatarWidgetDeps): () => void {
       if (!node.isConnected) return
       setTimeout(() => {
         if (!node.isConnected) return
-        if (Math.random() < 0.55) {
-          setWorkerClip(worker, WORK_SWARM_CLIPS[Math.floor(Math.random() * WORK_SWARM_CLIPS.length)] ?? 'worker_run')
-          setTimeout(() => {
-            if (!node.isConnected) return
-            setWorkerClip(worker, 'worker_run')
-            moveWorkerTo(worker, targetX + (Math.random() < 0.5 ? -1 : 1) * (20 + Math.random() * 40))
-          }, 3500 + Math.random() * 2500)
-        } else {
-          moveWorkerTo(worker, targetX + (Math.random() < 0.5 ? -1 : 1) * (20 + Math.random() * 50))
-        }
+        if (Math.random() < 0.55) startWork(worker)
+        else runTo(worker, (Math.random() < 0.5 ? -1 : 1) * (20 + Math.random() * 40))
         wander()
-      }, 2000 + Math.random() * 2500)
+      }, 2400 + Math.random() * 2600)
     }
     wander()
   }
 
-  /** 淡出后移除（不直接 remove：任务结束那一瞬会显得很突兀）。 */
+  /** 淡出后移除（任务结束那一瞬不突兀）。 */
   const retireWorker = (worker: SwarmWorker): void => {
+    if (worker.workTimer) clearTimeout(worker.workTimer)
+    worker.workTimer = undefined
     try {
       worker.node.style.opacity = '0'
       setTimeout(() => {
@@ -627,7 +695,10 @@ export function mountAvatarWidget(deps: AvatarWidgetDeps): () => void {
 
   /**
    * 工地鱼与主舞台共用一个 24fps 节拍：
-   * 推进帧 + 每 8 拍（≈0.33s）同步一次"母体位移"和"前后层"。
+   * 推进帧 + 每 8 拍（≈0.33s）同步一次"母体位移"。
+   *
+   * 跟随规则（按用户反馈定的）：母体一动 ⇒ 工人立刻切回**跑路**并跟着走；
+   * 母体停下后，wander 循环会自然把它们带回"干活 ↔ 跑动"的节奏。
    */
   const paintWorkers = (): void => {
     for (const worker of swarm) {
@@ -644,33 +715,38 @@ export function mountAvatarWidget(deps: AvatarWidgetDeps): () => void {
     followTick = (followTick + 1) % 8
     if (followTick !== 0 || swarm.length === 0) return
 
-    const rect = wrap.getBoundingClientRect()
+    const rect = rectOf(wrap)
     const previous = lastMainRect
-    const moved =
-      previous === undefined ||
-      Math.abs(rect.left - previous.left) > 0.5 ||
-      Math.abs(rect.top - previous.top) > 0.5
     const cfg = swarmConfig()
-    if (cfg.follow && previous !== undefined && moved) {
-      const dx = rect.left - previous.left
-      const dy = rect.top - previous.top
-      // 母体被拖动：所有工人保持相对位置一起走（短过渡，看起来像"追上来"）
+    const moved =
+      previous !== undefined &&
+      (Math.abs(rect.left - previous.left) > 0.5 || Math.abs(rect.top - previous.top) > 0.5)
+    lastMainRect = { left: rect.left, top: rect.top, width: rect.width, height: rect.height }
+    if (!moved) return
+
+    if (cfg.follow) {
       for (const worker of swarm) {
-        worker.targetX += dx
-        worker.targetY += dy
+        // 跟随期间用短过渡（否则 2.6s 的线性过渡会严重滞后）
+        worker.rushUntil = Date.now() + 600
+        // 跟着走 = 跑路：打断干活，切回 worker_run
+        if (worker.working) {
+          if (worker.workTimer) clearTimeout(worker.workTimer)
+          worker.workTimer = undefined
+          worker.working = false
+          setWorkerClip(worker, 'worker_run')
+          continue
+        }
         applyWorkerGeometry(worker)
       }
-    }
-    lastMainRect = { left: rect.left, top: rect.top, width: rect.width, height: rect.height }
-
-    // 前后层跟着母体/工人的位置变化重算（不要在每帧做，getBoundingClientRect 不便宜）
-    if (cfg.depth) {
-      const ground = mainGroundY()
+    } else if (cfg.depth) {
+      const ground = mainAnchor().y
       for (const worker of swarm) {
-        worker.node.style.zIndex = depthFor(worker.targetY, ground) === 'front' ? '2147483000' : '2147482997'
+        const targetY = ground + worker.offsetY
+        worker.node.style.zIndex = depthFor(targetY, ground) === 'front' ? '2147483000' : '2147482997'
       }
     }
   }
+
 
 
 
@@ -688,6 +764,8 @@ export function mountAvatarWidget(deps: AvatarWidgetDeps): () => void {
     const session = deps.getCurrentSession?.()
     if (!session) {
       wrap.hidden = true
+      // 没有会话：母体藏起来，工人也别留在屏幕上
+      syncWorkers(false)
       return
     }
     void (async () => {

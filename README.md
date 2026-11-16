@@ -271,6 +271,11 @@ npm run check:assets   # 素材体检（对着真实 avatar 目录）
 
 ## 7. 版本
 
+- `0.2.1` — 修实机四条反馈：
+  ① 翻转改**瞬时**（`transform` 不进 transition）；
+  ② **干活时不再漂移**：切动作前先按 `getComputedStyle().left` 把当前位置落定，干活期间 `left` 无过渡；
+  ③ **跟随母体时切回跑路**（0.35s 急行过渡），不再"边干活边被拖"；
+  ④ 位置模型改成**相对母体锚点的偏移**（`offsetX/offsetY`）：跟随不改偏移、wander 也只改偏移，跟完之后不会被拉回原起点。
 - `0.2.0` — 工地鱼空间行为：前后层（按脚底线 y）、按移动方向翻转（含锚点补偿）、跟随母体位移；
   可运行时开关（`window.__dafeiyuAvatarConfig`）；新增 `tests/layout.test.ts`（18 项测试）。
 - `0.1.0` — 从 `dsh-remote-dafeiyu@0.9.0-dafeiyu.83` 拆出；带状态池扩容、包工头触发、工地鱼集群；14 项测试通过。
