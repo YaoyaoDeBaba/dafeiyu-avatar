@@ -28,3 +28,8 @@ jobs:
       # 源码改了却没提交产物 ⇒ 这里变红（本地等价命令：npm run check）
       - name: dist/bundle 必须与源码同步
         run: node .check-dist.mjs
+
+      # 素材是外部产物（序列帧工具导出）。CI 上没有素材 ⇒ 脚本自己跳过（exit 0）。
+      # 本地可用 npm run check:assets 对着真实素材目录跑。
+      - name: 素材校验（manifest + 图集；无素材则跳过）
+        run: node .check-assets.mjs

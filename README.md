@@ -218,6 +218,28 @@ git push
 
 漏提交的表现是"装上去插件不加载"，且不报错——本仓库踩过一次。
 
+### 交付前跑两条检查
+
+```bash
+npm run check          # = check:dist + check:assets
+npm run check:dist     # 产物与源码是否同步（CI 同款）
+npm run check:assets   # 素材体检（对着真实 avatar 目录）
+```
+
+`check:assets` 校验（目录取 `$DSH_AVATAR_DIR` → `<DSH_HOME>/storages/dsh-remote-dafeiyu/avatar`，
+也可以用参数指定 `node .check-assets.mjs D:/some/avatar`）：
+
+| 检查 | 为什么 |
+|---|---|
+| `manifest` 可读、`states` 非空、id 不重复 | 空表 = 端上一直等素材 |
+| `file` 不带路径、文件存在、非空 | 路由会 404 |
+| 图集真实宽高 == `cols×cellWidth` × `rows×cellHeight` | 不符 ⇒ 切帧错位、动作串帧 |
+| `frames == cols×rows`（不符只告警） | 会播到空帧 |
+| `anchorX/anchorY` 在 0~1 | 越界端上会画出格 |
+| **`anchorY` 口径哨兵**：过半条目 `< 0.5` ⇒ 报错 | 多半是把序列帧 meta 的 y-from-bottom 粘过来了 |
+
+目录不存在时**打印"素材未安装，跳过"并 exit 0**——CI 上没有素材，不该红。
+
 **两条硬约束**（写错的表现都是"看起来装好了、就是不工作"）：
 1. `dist/bundle/client.cjs` 必须裹 `window.__ModuleLoader__.load({ id, factory })`，且 `id` **等于包名**；
 2. `src/client/main.ts` 的 `export const name` **必须等于包名**（`dsh-client-modules` 按 loader entry 名索引）。

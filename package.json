@@ -36,7 +36,8 @@
     "typecheck": "tsc --noEmit -p tsconfig.json && tsc -p tsconfig.client.json",
     "build": "node .bin-build.mjs",
     "test": "npm run build && node --test \"dist/tests/*.test.js\"",
-    "check": "node .check-dist.mjs"
+    "check:assets": "node .check-assets.mjs",
+    "check": "node .check-dist.mjs && node .check-assets.mjs"
   },
   "devDependencies": {
     "@types/node": "^26.6.3",
