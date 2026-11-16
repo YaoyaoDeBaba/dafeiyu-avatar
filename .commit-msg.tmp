@@ -1,0 +1,9 @@
+feat(swarm): 工地鱼数量按在跑的子代理数（0.3.0）
+
+- 个数 = min(在跑的子代理数, 4)；0 个就不出
+- 数据走宿主 SSE 轻量快照 { s: { 父会话: [总数, 在跑数] } }，按变化推送并去重，稳态零请求
+- 只在进入 running 时补一次 GET /subagents?sessionId=（30s 节流），防"刚连上还没帧"
+- 两者都拿不到才回落固定 count（swarmCount 的 fallback 分支）
+- SSE 只在 running 期间保持，回 idle / dispose 立刻关闭
+- 刻意不做周期性全量轮询（历史上 2.5s/次的列表请求把 DSH 拖慢过）
+- 新增 swarmCount 单测（封顶 / 取整 / 负数 / NaN / fallback 也封顶），共 20 项

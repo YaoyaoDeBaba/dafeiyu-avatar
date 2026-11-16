@@ -8,7 +8,7 @@
  */
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { workerLeft, facingFor, depthFor } from '../src/render/layout.js'
+import { workerLeft, facingFor, depthFor, swarmCount } from '../src/render/layout.js'
 
 test('朝右时：left = targetX - anchorX*w', () => {
   assert.equal(workerLeft(100, 0.5, 40, 1), 80)
@@ -37,4 +37,21 @@ test('层次：脚底线更靠下在前；相等时算后（稳定）', () => {
   assert.equal(depthFor(300, 280), 'front')
   assert.equal(depthFor(260, 280), 'behind')
   assert.equal(depthFor(280, 280), 'behind')
+})
+
+test('工地鱼数量：按在跑的子代理数，上限 4', () => {
+  assert.equal(swarmCount(0, 2), 0) // 没有子代理 ⇒ 一个都不出
+  assert.equal(swarmCount(1, 2), 1)
+  assert.equal(swarmCount(3, 2), 3)
+  assert.equal(swarmCount(4, 2), 4)
+  assert.equal(swarmCount(9, 2), 4) // 超过上限只显示 4 个
+  assert.equal(swarmCount(2.7, 2), 2) // 取整
+  assert.equal(swarmCount(-3, 2), 0) // 负数当 0
+})
+
+test('工地鱼数量：拿不到子代理数时回落到旧行为（fallback），同样受上限约束', () => {
+  assert.equal(swarmCount(undefined, 2), 2)
+  assert.equal(swarmCount(undefined, 9), 4) // fallback 也封顶
+  assert.equal(swarmCount(undefined, 0), 0)
+  assert.equal(swarmCount(Number.NaN, 3), 3) // NaN 当拿不到
 })

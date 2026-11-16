@@ -28,3 +28,21 @@ export function facingFor(prevX: number, nextX: number, current: 1 | -1): 1 | -1
 export function depthFor(workerGroundY: number, mainGroundY: number): 'front' | 'behind' {
   return workerGroundY > mainGroundY ? 'front' : 'behind'
 }
+
+/** 工地鱼上限。超过这个数的子代理也只显示这么多个（再多画面就糊了）。 */
+export const WORK_SWARM_MAX = 4
+
+/**
+ * 该出几个工地鱼。
+ *
+ * - 拿得到"在跑的子代理数" ⇒ 严格按它（0 就一个都不出），封顶 `max`；
+ * - 拿不到（宿主没这条路由 / 请求失败）⇒ 回落到 `fallback`（老行为），因为
+ *   "看不见子代理数"不等于"没有子代理在干活"。
+ */
+export function swarmCount(runningSubagents: number | undefined, fallback: number, max: number = WORK_SWARM_MAX): number {
+  const cap = Math.max(0, Math.floor(max))
+  if (runningSubagents === undefined || !Number.isFinite(runningSubagents)) {
+    return Math.max(0, Math.min(cap, Math.floor(fallback)))
+  }
+  return Math.max(0, Math.min(cap, Math.floor(runningSubagents)))
+}

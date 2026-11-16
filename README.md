@@ -155,11 +155,35 @@ pnpm add file:D:/dafeiyu-market/dsh-avatar
 | 行为 | 规则 | 实现 |
 |---|---|---|
 | **前后层** | 比"脚底线的屏幕 y"：工人更靠下 ⇒ 在母体前面（`z-index 2147483000`），否则在后面（`2147482997`） | `render/layout.ts#depthFor` |
-| **按方向翻转** | 往左走镜像（`scaleX(-1)`），往右朝右；**位移 <1px 不改朝向**（防抖）；停下干活保持朝向 | `facingFor` + `workerLeft` |
-| **跟随母体** | 母体被拖动/换位时，所有工人按**同一 delta** 平移，用 0.3s 短过渡追上去 | `widget.ts` 每 8 拍（≈0.33s）对比一次 rect |
+| **按方向翻转** | 往左走镜像（`scaleX(-1)`，**瞬时**，不参与过渡），往右朝右；**位移 <1px 不改朝向**（防抖）；停下干活保持朝向 | `facingFor` + `workerLeft` |
+| **跟随母体** | 母体被拖动/换位时，所有工人按**相对偏移**跟着走，用 0.35s 急行过渡追上；跟随期间若正在干活会被打断、切回跑路 | `widget.ts` 每 8 拍（≈0.33s）对比一次 rect |
 
 翻转易错点：镜像后格子内锚点从 `anchorX` 变成 `1-anchorX`，`left` 必须按
 `targetX - (1-anchorX)*w` 算，否则往左走会横向跳 `(1-2*anchorX)*w` 像素。这条有单测（`tests/layout.test.ts`）。
+
+**干活时不许动**：切到螺丝/砌砖/张望之前，先按 `getComputedStyle().left` 把当前位置"落定"，
+干活期间样式里根本没有 `left` 过渡——否则上一次跑动的 2.6s 会继续把人在原地拖。
+
+### 4.2 工地鱼的数量 = 在跑的子代理数（封顶 4）
+
+```
+n = 当前会话下 status === 'running' 的子代理数
+工地鱼个数 = min(n, 4)        // n = 0 时一个都不出
+```
+
+**数量来源（刻意不做轮询，2026-11-16）**：
+
+| 优先 | 来源 | 代价 |
+|---|---|---|
+| 1 | SSE `GET /api/dsh-remote-dafeiyu/subagents/stream`，帧体是轻量快照 `{ s: { 父会话id: [总数, 在跑数] } }` | 一条长连接，宿主**按变化推送并去重**，稳态零请求 |
+| 2 | 进入 `running` 时补一次 `GET /subagents?sessionId=`（**30s 节流**） | 防"刚连上还没有帧" |
+| 3 | 两者都拿不到 → `undefined` | 回落到固定 `count` 个（老行为） |
+
+> 历史教训：面板曾经"推送一次 → 全量拉一次"，等于 2.5 次/秒的列表请求，把 DSH 拖慢过。
+> 这里**只消费宿主已经推好的快照**，不再周期性拉全量。
+
+SSE 只在 `status === 'running'` 期间保持，回到 idle 立刻关闭（`dispose()` 里也会关）。
+
 
 ### 4.2 运行时开关
 
@@ -167,11 +191,12 @@ pnpm add file:D:/dafeiyu-market/dsh-avatar
 
 ```js
 window.__dafeiyuAvatarConfig = {
-  workers: { enabled: true, count: 2, flip: true, depth: true, follow: true },
+  workers: { enabled: true, count: 2, flip: true, depth: true, follow: true, followSubagents: true },
 }
 ```
 
-`count` 取值 1~4；`enabled:false` 直接不出工地鱼。
+`count` 是**拿不到子代理数时的回落值**（取值 1~4）；`followSubagents:false` = 不按子代理数、固定出 `count` 个；
+`enabled:false` 直接不出工地鱼。
 
 ---
 
@@ -271,11 +296,12 @@ npm run check:assets   # 素材体检（对着真实 avatar 目录）
 
 ## 7. 版本
 
+- `0.3.0` — 工地鱼数量改为**按在跑的子代理数**（封顶 4，0 个就不出）。数据走宿主 SSE 的轻量快照
+  `{ s: { 父会话: [总数, 在跑数] } }`，**不做周期性全量轮询**；只在进入 running 时补一次
+  `GET /subagents`（30s 节流）兜底，拿不到才回落固定 `count`。
 - `0.2.1` — 修实机四条反馈：
   ① 翻转改**瞬时**（`transform` 不进 transition）；
   ② **干活时不再漂移**：切动作前先按 `getComputedStyle().left` 把当前位置落定，干活期间 `left` 无过渡；
   ③ **跟随母体时切回跑路**（0.35s 急行过渡），不再"边干活边被拖"；
   ④ 位置模型改成**相对母体锚点的偏移**（`offsetX/offsetY`）：跟随不改偏移、wander 也只改偏移，跟完之后不会被拉回原起点。
-- `0.2.0` — 工地鱼空间行为：前后层（按脚底线 y）、按移动方向翻转（含锚点补偿）、跟随母体位移；
-  可运行时开关（`window.__dafeiyuAvatarConfig`）；新增 `tests/layout.test.ts`（18 项测试）。
-- `0.1.0` — 从 `dsh-remote-dafeiyu@0.9.0-dafeiyu.83` 拆出；带状态池扩容、包工头触发、工地鱼集群；14 项测试通过。
+- `0.2.0` — 工地鱼空间行为

@@ -17,7 +17,7 @@
  * 掉拍只会让同一个动作播得慢一点，不跳帧、不回第 0 帧。`ClipPacer` 是纯逻辑，可单测。
  */
 import { ClipPacer, type AvatarPool, type ClipSpec, type FrameView } from '../render/playback.js'
-import { workerLeft, facingFor, depthFor } from '../render/layout.js'
+import { workerLeft, facingFor, depthFor, swarmCount, WORK_SWARM_MAX } from '../render/layout.js'
 import { resolveHostUrl } from './host-url.js'
 
 type AvatarStateView = {
@@ -492,6 +492,8 @@ export function mountAvatarWidget(deps: AvatarWidgetDeps): () => void {
     flip: boolean
     depth: boolean
     follow: boolean
+    /** 是否按"在跑的子代理数"决定个数（关掉 = 退回固定 count 个） */
+    followSubagents: boolean
   }
   const swarmConfig = (): SwarmConfig => {
     const raw = (globalThis as Record<string, unknown>).__dafeiyuAvatarConfig as
@@ -504,6 +506,7 @@ export function mountAvatarWidget(deps: AvatarWidgetDeps): () => void {
       flip: cfg.flip !== false,
       depth: cfg.depth !== false,
       follow: cfg.follow !== false,
+      followSubagents: cfg.followSubagents !== false,
     }
   }
 
@@ -682,16 +685,100 @@ export function mountAvatarWidget(deps: AvatarWidgetDeps): () => void {
     }
   }
 
-  const syncWorkers = (running: boolean): void => {
+  /**
+   * 对账：屏幕上工地鱼的个数 = `desired`（按"在跑的子代理数"算，封顶 4）。
+   * 多退（淡出）少补，不做全量重建——重建会让还在干活的工人闪一下。
+   */
+  const syncWorkers = (desired: number): void => {
     const cfg = swarmConfig()
-    if (!running || !cfg.enabled) {
-      for (const worker of swarm.splice(0)) retireWorker(worker)
-      return
+    const target = cfg.enabled ? Math.max(0, Math.min(WORK_SWARM_MAX, Math.floor(desired))) : 0
+    while (swarm.length > target) {
+      const worker = swarm.pop()
+      if (worker) retireWorker(worker)
     }
+    if (target === 0) return
     // 素材没到齐就等下一次轮询，避免生成一堆空白块
     if (states.length === 0) return
-    while (swarm.length < cfg.count) spawnWorker()
+    while (swarm.length < target) spawnWorker()
   }
+
+  /* ───────────────── 在跑的子代理数 ───────────────── */
+
+  /**
+   * **不做轮询**（历史上"每 2.5s 拉一次全量列表"把 DSH 拖慢过）。
+   *
+   * 数据来源优先级：
+   *   1. SSE `GET /api/dsh-remote-dafeiyu/subagents/stream` —— 帧里带轻量快照
+   *      `{ s: { 父会话id: [总数, 在跑数] } }`，宿主按变化推送并去重，稳态零请求；
+   *   2. 兜底：进入 running 时**补一次** `GET /subagents?sessionId=`（30s 节流），
+   *      因为 SSE 只在"有变化"时推，刚连上可能还没有帧；
+   *   3. 都拿不到 → `undefined`，由 `swarmCount` 回落到固定个数。
+   */
+  const SUBAGENTS_BASE = '/api/dsh-remote-dafeiyu/subagents'
+  let subagentStream: EventSource | undefined
+  let runningSubagents: number | undefined
+  let subagentFetchAt = 0
+
+  const applySnapshot = (raw: string): void => {
+    const session = deps.getCurrentSession?.()
+    if (session === undefined || session === null) return
+    try {
+      const parsed = JSON.parse(raw) as { s?: Record<string, [number, number]> }
+      const row = parsed.s?.[session]
+      runningSubagents = Array.isArray(row) ? (typeof row[1] === 'number' ? row[1] : 0) : 0
+    } catch {
+      /* 帧体不是我们认得的形状：保持上一次的值 */
+    }
+  }
+
+  const ensureSubagentStream = (): void => {
+    if (subagentStream !== undefined) return
+    const Ctor = (globalThis as { EventSource?: typeof EventSource }).EventSource
+    if (typeof Ctor !== 'function') return
+    try {
+      const stream = new Ctor(resolveHostUrl(`${SUBAGENTS_BASE}/stream`))
+      stream.onmessage = (event: MessageEvent) => {
+        if (typeof event.data !== 'string') return
+        // 老宿主的帧体只有 "change"：那就补一次全量（仍受 30s 节流）
+        if (event.data === 'change') {
+          const session = deps.getCurrentSession?.()
+          if (session !== undefined && session !== null) void fetchRunningOnce(session)
+          return
+        }
+        applySnapshot(event.data)
+      }
+      subagentStream = stream
+    } catch {
+      subagentStream = undefined
+    }
+  }
+
+  const closeSubagentStream = (): void => {
+    try {
+      subagentStream?.close()
+    } catch {
+      /* ignore */
+    }
+    subagentStream = undefined
+  }
+
+  const fetchRunningOnce = async (sessionId: string): Promise<void> => {
+    const now = Date.now()
+    if (now - subagentFetchAt < 30_000) return
+    subagentFetchAt = now
+    try {
+      const response = await fetch(resolveHostUrl(`${SUBAGENTS_BASE}?sessionId=${encodeURIComponent(sessionId)}`), {
+        signal: AbortSignal.timeout(3000),
+      })
+      if (!response.ok) return
+      const answer = (await response.json()) as { ok?: boolean; items?: Array<{ status?: string }> }
+      if (answer.ok !== true || !Array.isArray(answer.items)) return
+      runningSubagents = answer.items.filter((row) => row.status === 'running').length
+    } catch {
+      /* 拿不到就保持 undefined → 回落固定个数 */
+    }
+  }
+
 
   /**
    * 工地鱼与主舞台共用一个 24fps 节拍：
@@ -765,7 +852,7 @@ export function mountAvatarWidget(deps: AvatarWidgetDeps): () => void {
     if (!session) {
       wrap.hidden = true
       // 没有会话：母体藏起来，工人也别留在屏幕上
-      syncWorkers(false)
+      syncWorkers(0)
       return
     }
     void (async () => {
@@ -789,8 +876,17 @@ export function mountAvatarWidget(deps: AvatarWidgetDeps): () => void {
             bossCooldownUntil = Date.now() + BOSS_COOLDOWN_MS
           }
         }
-        // 有任务在跑 → 母体周围出动工地鱼；跑完自动收工。
-        syncWorkers(status === 'running')
+        // 有任务在跑 → 工地鱼按"在跑的子代理数"出动（封顶 4）；跑完自动收工。
+        // 数量来源见上方「在跑的子代理数」：SSE 推送为主，进入 running 时补一次全量。
+        if (status === 'running') {
+          ensureSubagentStream()
+          if (runningSubagents === undefined) void fetchRunningOnce(session)
+        } else {
+          closeSubagentStream()
+          runningSubagents = undefined
+        }
+        const swarmCfg = swarmConfig()
+        syncWorkers(swarmCfg.followSubagents ? swarmCount(runningSubagents, swarmCfg.count) : swarmCfg.count)
         if (Date.now() < pokeUntil) {
           wrap.hidden = false
           return
@@ -882,6 +978,7 @@ export function mountAvatarWidget(deps: AvatarWidgetDeps): () => void {
 
   const dispose = (): void => {
     disposed = true
+    closeSubagentStream()
     drag = undefined
     if (timer) clearInterval(timer)
     if (pollTimer) clearInterval(pollTimer)
