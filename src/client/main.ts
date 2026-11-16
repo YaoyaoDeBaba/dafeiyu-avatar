@@ -7,7 +7,6 @@
  * 这一半只挂悬浮形象（聊天页左下角）。设置页里的形象面板由宿主页面按需引用
  * `./panel.ts` 的 `buildAvatarPanel()`（见 README「设置面板怎么接」），不在这里自动注册。
  */
-import { resolveHostUrl } from './host-url.js'
 import { mountAvatarWidget } from './widget.js'
 import { registerAvatarRoom } from './room.js'
 
@@ -75,13 +74,23 @@ export function apply(ctx: ClientContext): (() => void) | void {
     cleanup = mountAvatarWidget({
       getCurrentSession: resolveCurrentSession(ctx),
       onMenuAction: (id) => {
-        // 独立包没有本体那些面板（子代理/识图/转生/序列帧工具），
-        // 菜单项只保留"打开形象素材目录说明页"这一类安全动作。
-        if (id === 'sprite') {
-          ;(globalThis as { open?: (url: string, target?: string) => unknown }).open?.(
-            resolveHostUrl('/api/dsh-remote-dafeiyu/avatar/manifest'),
-            '_blank',
-          )
+        /*
+         * 2026-11-16（0.2.1）：菜单动作**必须派发给宿主**。
+         *
+         * 原来这里什么都做（只有 sprite 跳 manifest JSON），结果五个菜单项点下去毫无反应——
+         * 因为那些能力（派活助手/识图/云雀/转生/分身/序列帧工具）全在宿主那侧，
+         * 本包**没有也不该有**它们的实现。跨包不能 import，所以只共享一个事件名：
+         *
+         *   本包派发 `dafeiyu:action`（detail.id） → 宿主 `onAvatarMenuAction` 分发
+         *
+         * 宿主的接收端早就位了（`dsh-remote-dafeiyu` 的 `main.ts`），它认的 id 是
+         * `vision` / `subagents` / `rebirth` / `branch` / `xyq` / `sprite`。
+         * 宿主版本旧（没有接收端）时，这个事件就是无人监听，**静默无害**。
+         */
+        try {
+          window.dispatchEvent(new CustomEvent('dafeiyu:action', { detail: { id } }))
+        } catch {
+          /* 派发失败不影响小窗本身 */
         }
       },
     })

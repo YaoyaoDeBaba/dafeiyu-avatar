@@ -19,6 +19,7 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import vm from 'node:vm'
 import { fileURLToPath } from 'node:url'
+import { readFileSync } from 'node:fs'
 
 const WIDGET_SOURCE = fileURLToPath(new URL('../../src/client/widget.ts', import.meta.url))
 const FPS = 24
@@ -333,4 +334,14 @@ test('模块图里没有同步 IO：形象脚本不许 require node: 内建', as
   assert.ok(!/require\(\s*['"]node:/.test(bundle), '形象脚本里出现了 node: 内建（浏览器面不该有同步 IO）')
   assert.ok(!/from\s*['"]node:/.test(bundle), '形象脚本里出现了 node: 内建（浏览器面不该有同步 IO）')
   assert.ok(!/readFileSync|fs\./.test(bundle), '形象脚本里出现了文件读取')
+})
+
+test('菜单动作派发给宿主：onMenuAction 必须 dispatch dafeiyu:action（跨包唯一通道）', () => {
+  // 2026-11-16 真机：五个菜单项点了毫无反应——因为 onMenuAction 原本只处理了 sprite。
+  // 本包没有那些能力（派活/识图/云雀/转生/分身/序列帧页），必须交给宿主执行。
+  const source = readFileSync('dist/bundle/client.cjs', 'utf8')  // cwd = 包根
+  // 产物会压缩（detail:{id}），只断言语义：事件名对、且是 CustomEvent 派发的
+  assert.ok(/dispatchEvent\(new CustomEvent\(['`"]dafeiyu:action['`"]/.test(source), '必须是 CustomEvent 派发')
+  // 反证：不许再自己实现那些动作（它们是宿主的）
+  assert.ok(!source.includes('/plugins/dafeiyu-sprite/'), '不该自己跳序列帧工具页（宿主负责）')
 })
