@@ -17,6 +17,7 @@
  * 掉拍只会让同一个动作播得慢一点，不跳帧、不回第 0 帧。`ClipPacer` 是纯逻辑，可单测。
  */
 import { ClipPacer, type AvatarPool, type ClipSpec, type FrameView } from '../render/playback.js'
+import { workerLeft, facingFor, depthFor } from '../render/layout.js'
 import { resolveHostUrl } from './host-url.js'
 
 type AvatarStateView = {
@@ -456,13 +457,60 @@ export function mountAvatarWidget(deps: AvatarWidgetDeps): () => void {
 
   interface SwarmWorker {
     node: HTMLDivElement
-    baseX: number
-    baseY: number
+    /** 锚点要落到的屏幕坐标（≈ 角色脚底基线）。 */
+    targetX: number
+    targetY: number
+    facing: 1 | -1
     frame: number
+    anchorX: number
+    anchorY: number
+    width: number
+    height: number
     meta?: { cols: number; rows: number; frames: number }
   }
 
   const swarm: SwarmWorker[] = []
+  let lastMainRect: { left: number; top: number; width: number; height: number } | undefined
+  let followTick = 0
+
+  /** 宿主/用户在控制台改 `window.__dafeiyuAvatarConfig.workers` 即可开关这些行为。 */
+  interface SwarmConfig {
+    enabled: boolean
+    count: number
+    flip: boolean
+    depth: boolean
+    follow: boolean
+  }
+  const swarmConfig = (): SwarmConfig => {
+    const raw = (globalThis as Record<string, unknown>).__dafeiyuAvatarConfig as
+      | { workers?: Partial<SwarmConfig> }
+      | undefined
+    const cfg = raw?.workers ?? {}
+    return {
+      enabled: cfg.enabled !== false,
+      count: typeof cfg.count === 'number' ? Math.max(1, Math.min(4, Math.round(cfg.count))) : WORK_SWARM_SIZE,
+      flip: cfg.flip !== false,
+      depth: cfg.depth !== false,
+      follow: cfg.follow !== false,
+    }
+  }
+
+  /** 母体角色的"脚底基线"屏幕 y：舞台内锚点固定落在 ANCHOR_SCREEN_Y。 */
+  const mainGroundY = (): number => stage.getBoundingClientRect().top + ANCHOR_SCREEN_Y
+
+  /** 把 target/facing 落成具体像素；翻转时用 workerLeft 补偿锚点镜像。 */
+  const applyWorkerGeometry = (worker: SwarmWorker): void => {
+    const cfg = swarmConfig()
+    const facing: 1 | -1 = cfg.flip ? worker.facing : 1
+    worker.node.style.left = `${workerLeft(worker.targetX, worker.anchorX, worker.width, facing)}px`
+    worker.node.style.top = `${worker.targetY - worker.anchorY * worker.height}px`
+    worker.node.style.transform = facing === -1 ? 'scaleX(-1)' : ''
+    worker.node.style.zIndex = cfg.depth
+      ? depthFor(worker.targetY, mainGroundY()) === 'front'
+        ? '2147483000'
+        : '2147482997'
+      : '2147482998'
+  }
 
   const setWorkerClip = (worker: SwarmWorker, id: string): void => {
     const state = states.find((row) => row.id === id)
@@ -474,29 +522,59 @@ export function mountAvatarWidget(deps: AvatarWidgetDeps): () => void {
       state.cellWidth > 0 && state.cellHeight > 0
         ? Math.round((WORK_SWARM_HEIGHT * state.cellWidth) / state.cellHeight)
         : Math.round(WORK_SWARM_HEIGHT * 0.75)
-    worker.node.style.height = `${WORK_SWARM_HEIGHT}px`
+    worker.height = WORK_SWARM_HEIGHT
+    worker.width = width
+    worker.node.style.height = `${worker.height}px`
     worker.node.style.width = `${width}px`
+    // 锚点逐条不同（各动画的格子/脚底位置不一样），换片要重新贴一次
+    worker.anchorX = typeof state.anchorX === 'number' ? state.anchorX : 0.5
+    worker.anchorY = typeof state.anchorY === 'number' ? state.anchorY : 0.992
     worker.frame = 0
     worker.meta = { cols: state.cols, rows: state.rows, frames: state.frames }
+    applyWorkerGeometry(worker)
+  }
+
+  /** 把工人挪到新的锚点坐标；朝向按本次位移判断（<1px 不动，防抖）。 */
+  const moveWorkerTo = (worker: SwarmWorker, x: number, y?: number): void => {
+    worker.facing = facingFor(worker.targetX, x, worker.facing)
+    worker.targetX = x
+    if (y !== undefined) worker.targetY = y
+    applyWorkerGeometry(worker)
   }
 
   const spawnWorker = (): void => {
+    const cfg = swarmConfig()
+    if (!cfg.enabled) return
     const rect = wrap.getBoundingClientRect()
     const dir = swarm.length % 2 === 0 ? -1 : 1
     const node = doc.createElement('div')
+    // left 用 2.6s 线性做"跑动"，跟随用 .3s 短过渡；opacity 做淡入淡出
     node.style.cssText =
       'position:fixed;background-repeat:no-repeat;background-position:0 0;pointer-events:none;' +
-      'z-index:2147482998;opacity:0;transition:left 2.6s linear,opacity .4s ease;'
-    const baseX = rect.left + rect.width / 2 + dir * (44 + Math.random() * 70)
-    const baseY = rect.top + rect.height * 0.58 + Math.random() * 16
-    node.style.left = `${baseX}px`
-    node.style.top = `${baseY}px`
+      'z-index:2147482998;opacity:0;will-change:left,top;' +
+      'transition:left 2.6s linear,top .3s ease,opacity .4s ease,transform .2s ease;'
+    const targetX = rect.left + rect.width / 2 + dir * (44 + Math.random() * 70)
+    const targetY = rect.top + ANCHOR_SCREEN_Y + Math.random() * 10
     doc.body.appendChild(node)
 
-    const worker: SwarmWorker = { node, baseX, baseY, frame: 0 }
+    const worker: SwarmWorker = {
+      node,
+      targetX,
+      targetY,
+      facing: dir === -1 ? -1 : 1,
+      frame: 0,
+      anchorX: 0.5,
+      anchorY: 0.992,
+      width: Math.round(WORK_SWARM_HEIGHT * 0.75),
+      height: WORK_SWARM_HEIGHT,
+    }
     swarm.push(worker)
     setWorkerClip(worker, 'worker_run')
+    // 首帧不要从 (0,0) 滑过来
+    node.style.transition = 'none'
+    applyWorkerGeometry(worker)
     requestAnimationFrame(() => {
+      node.style.transition = 'left 2.6s linear,top .3s ease,opacity .4s ease,transform .2s ease'
       node.style.opacity = '0.95'
     })
 
@@ -509,10 +587,10 @@ export function mountAvatarWidget(deps: AvatarWidgetDeps): () => void {
           setTimeout(() => {
             if (!node.isConnected) return
             setWorkerClip(worker, 'worker_run')
-            node.style.left = `${baseX + (Math.random() < 0.5 ? -1 : 1) * (20 + Math.random() * 40)}px`
+            moveWorkerTo(worker, targetX + (Math.random() < 0.5 ? -1 : 1) * (20 + Math.random() * 40))
           }, 3500 + Math.random() * 2500)
         } else {
-          node.style.left = `${baseX + (Math.random() < 0.5 ? -1 : 1) * (20 + Math.random() * 50)}px`
+          moveWorkerTo(worker, targetX + (Math.random() < 0.5 ? -1 : 1) * (20 + Math.random() * 50))
         }
         wander()
       }, 2000 + Math.random() * 2500)
@@ -520,23 +598,37 @@ export function mountAvatarWidget(deps: AvatarWidgetDeps): () => void {
     wander()
   }
 
-  const syncWorkers = (running: boolean): void => {
-    if (!running) {
-      for (const worker of swarm.splice(0)) {
+  /** 淡出后移除（不直接 remove：任务结束那一瞬会显得很突兀）。 */
+  const retireWorker = (worker: SwarmWorker): void => {
+    try {
+      worker.node.style.opacity = '0'
+      setTimeout(() => {
         try {
           worker.node.remove()
         } catch {
           /* ignore */
         }
-      }
+      }, 320)
+    } catch {
+      /* ignore */
+    }
+  }
+
+  const syncWorkers = (running: boolean): void => {
+    const cfg = swarmConfig()
+    if (!running || !cfg.enabled) {
+      for (const worker of swarm.splice(0)) retireWorker(worker)
       return
     }
     // 素材没到齐就等下一次轮询，避免生成一堆空白块
     if (states.length === 0) return
-    while (swarm.length < WORK_SWARM_SIZE) spawnWorker()
+    while (swarm.length < cfg.count) spawnWorker()
   }
 
-  /** 工地鱼有自己的 24fps 节拍（和主舞台同一个 ticker）。 */
+  /**
+   * 工地鱼与主舞台共用一个 24fps 节拍：
+   * 推进帧 + 每 8 拍（≈0.33s）同步一次"母体位移"和"前后层"。
+   */
   const paintWorkers = (): void => {
     for (const worker of swarm) {
       const meta = worker.meta
@@ -548,7 +640,38 @@ export function mountAvatarWidget(deps: AvatarWidgetDeps): () => void {
       const py = meta.rows > 1 ? (row / (meta.rows - 1)) * 100 : 0
       worker.node.style.backgroundPosition = `${px}% ${py}%`
     }
+
+    followTick = (followTick + 1) % 8
+    if (followTick !== 0 || swarm.length === 0) return
+
+    const rect = wrap.getBoundingClientRect()
+    const previous = lastMainRect
+    const moved =
+      previous === undefined ||
+      Math.abs(rect.left - previous.left) > 0.5 ||
+      Math.abs(rect.top - previous.top) > 0.5
+    const cfg = swarmConfig()
+    if (cfg.follow && previous !== undefined && moved) {
+      const dx = rect.left - previous.left
+      const dy = rect.top - previous.top
+      // 母体被拖动：所有工人保持相对位置一起走（短过渡，看起来像"追上来"）
+      for (const worker of swarm) {
+        worker.targetX += dx
+        worker.targetY += dy
+        applyWorkerGeometry(worker)
+      }
+    }
+    lastMainRect = { left: rect.left, top: rect.top, width: rect.width, height: rect.height }
+
+    // 前后层跟着母体/工人的位置变化重算（不要在每帧做，getBoundingClientRect 不便宜）
+    if (cfg.depth) {
+      const ground = mainGroundY()
+      for (const worker of swarm) {
+        worker.node.style.zIndex = depthFor(worker.targetY, ground) === 'front' ? '2147483000' : '2147482997'
+      }
+    }
   }
+
 
 
   const refresh = (): void => {

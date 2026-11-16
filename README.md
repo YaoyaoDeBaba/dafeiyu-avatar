@@ -150,6 +150,29 @@ pnpm add file:D:/dafeiyu-market/dsh-avatar
 
 新加一个动作只要往 `manifest.json` 里加一条、把 id 写进池子（或等池子改成从 manifest 自动派生），**不用改渲染代码**。
 
+### 4.1 工地鱼的三个空间行为（0.2.0）
+
+| 行为 | 规则 | 实现 |
+|---|---|---|
+| **前后层** | 比"脚底线的屏幕 y"：工人更靠下 ⇒ 在母体前面（`z-index 2147483000`），否则在后面（`2147482997`） | `render/layout.ts#depthFor` |
+| **按方向翻转** | 往左走镜像（`scaleX(-1)`），往右朝右；**位移 <1px 不改朝向**（防抖）；停下干活保持朝向 | `facingFor` + `workerLeft` |
+| **跟随母体** | 母体被拖动/换位时，所有工人按**同一 delta** 平移，用 0.3s 短过渡追上去 | `widget.ts` 每 8 拍（≈0.33s）对比一次 rect |
+
+翻转易错点：镜像后格子内锚点从 `anchorX` 变成 `1-anchorX`，`left` 必须按
+`targetX - (1-anchorX)*w` 算，否则往左走会横向跳 `(1-2*anchorX)*w` 像素。这条有单测（`tests/layout.test.ts`）。
+
+### 4.2 运行时开关
+
+控制台改一下即可（下次 spawn/移动时生效，无需重载）：
+
+```js
+window.__dafeiyuAvatarConfig = {
+  workers: { enabled: true, count: 2, flip: true, depth: true, follow: true },
+}
+```
+
+`count` 取值 1~4；`enabled:false` 直接不出工地鱼。
+
 ---
 
 ## 5. 设置页「形象」房间（大肥鱼 .84 房间注册制）
@@ -248,4 +271,6 @@ npm run check:assets   # 素材体检（对着真实 avatar 目录）
 
 ## 7. 版本
 
+- `0.2.0` — 工地鱼空间行为：前后层（按脚底线 y）、按移动方向翻转（含锚点补偿）、跟随母体位移；
+  可运行时开关（`window.__dafeiyuAvatarConfig`）；新增 `tests/layout.test.ts`（18 项测试）。
 - `0.1.0` — 从 `dsh-remote-dafeiyu@0.9.0-dafeiyu.83` 拆出；带状态池扩容、包工头触发、工地鱼集群；14 项测试通过。
