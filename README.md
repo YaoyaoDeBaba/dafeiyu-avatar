@@ -204,6 +204,20 @@ npm run build     # tsc(宿主+测试) → tsc(客户端类型检查) → esbuil
 npm test          # 14 项判据：播片节奏 10 项 + 假 DOM 回放 4 项
 ```
 
+### ⚠️ `dist/bundle/` 必须提交进仓库
+
+市场 / `git+` 安装**不会跑构建**，而 `package.json` 的 `main` 与 `exports['./client']` 都指向 `dist/bundle/`。
+`.gitignore` 里是 `/dist/*` + `!/dist/bundle/`（**只放行 bundle**），改完代码要：
+
+```bash
+npm run build
+git add -f dist/bundle
+git commit -m "build: 入库 dist/bundle（装机不构建，产物必须提交）"
+git push
+```
+
+漏提交的表现是"装上去插件不加载"，且不报错——本仓库踩过一次。
+
 **两条硬约束**（写错的表现都是"看起来装好了、就是不工作"）：
 1. `dist/bundle/client.cjs` 必须裹 `window.__ModuleLoader__.load({ id, factory })`，且 `id` **等于包名**；
 2. `src/client/main.ts` 的 `export const name` **必须等于包名**（`dsh-client-modules` 按 loader entry 名索引）。
