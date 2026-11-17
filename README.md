@@ -301,6 +301,24 @@ git push
 
 漏提交的表现是"装上去插件不加载"，且不报错——本仓库踩过一次。
 
+### 发版清单（四步，缺一不可）
+
+```bash
+# 1) 改版本号（package.json 的 version）
+# 2) 构建 + 跑判据
+npm run build && npm test
+# 3) 提交（源码 + 产物一起）
+git add -A && git add -f dist/bundle
+git commit -m "feat(...): …（X.Y.Z）"
+# 4) 打 tag 并推（**tag 与 package.json 的 version 必须一致**）
+git tag -a vX.Y.Z -m "X.Y.Z：一句话"
+git push origin main
+git push origin vX.Y.Z
+```
+
+> 只改 `package.json` 不打 tag 的话，仓库里看不出"哪个提交是 0.4.0"——
+> 上次就是这样漏的，之后按清单走。
+
 ### 交付前跑两条检查
 
 ```bash
