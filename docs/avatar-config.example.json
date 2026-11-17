@@ -1,0 +1,15 @@
+{
+  "_说明": "工地鱼行为表。放到 <DSH_HOME>/storages/dsh-remote-dafeiyu/avatar/avatar-config.json 即生效；改完刷新页面（不用重启宿主）。字段缺省走内置默认值，写错的值会被夹回合法范围。",
+  "height": 96,
+  "moveSpeed": 34,
+  "minMoveMs": 1400,
+  "maxMoveMs": 3200,
+  "workMs": [3500, 6000],
+  "workChance": 0.55,
+  "idleMs": [1600, 3400],
+  "offsetXRange": [44, 114],
+  "offsetYRange": [4, 14],
+  "workClips": ["worker_screw", "worker_brick", "worker_look"],
+  "runClip": "worker_run",
+  "idleClip": "worker_look"
+}

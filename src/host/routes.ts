@@ -20,6 +20,7 @@ export const AVATAR_BASE = '/api/dsh-remote-dafeiyu/avatar'
 export const AVATAR_MANIFEST_ROUTE = `${AVATAR_BASE}/manifest`
 export const AVATAR_SHEET_ROUTE = `${AVATAR_BASE}/sheet`
 export const AVATAR_STATE_ROUTE = `${AVATAR_BASE}/state`
+export const AVATAR_CONFIG_ROUTE = `${AVATAR_BASE}/config`
 
 // 素材契约与读盘都在 `platform/avatar-manifest.ts`（本体协议层也要用，形象拆包后它留下）。
 // 这里**引入并转出**，避免同一份 schema 在 `avatar/` 里再存一遍。
@@ -106,5 +107,33 @@ export function avatarStateHandler(getStatus: (sessionId: string) => string | un
       status = undefined
     }
     json(response, 200, { ok: true, status: status === 'running' ? 'running' : 'idle' })
+  }
+}
+
+/**
+ * `GET /avatar/config`：**行为表外置**（`<avatarDir>/avatar-config.json`）。
+ *
+ * 改这个文件就能调工地鱼的手感（跑多快、停多久、干活概率、游走半径），
+ * 不用改代码、不用重新构建、不用重启宿主——客户端只取一次（不是轮询）。
+ *
+ * 文件不存在 / 坏 JSON 都返回 `{ ok:true, config:{} }`：让客户端走默认值，
+ * 而不是把"配置写坏了"变成"形象不动了"。
+ */
+export function avatarConfigHandler(dir: string) {
+  return (request: IncomingMessage, response: ServerResponse): void => {
+    applyCors(request, response)
+    if (preflight(request, response)) return
+    const denied = rejected(request)
+    if (denied) return json(response, 403, { ok: false, error: denied })
+    if (!readonly(request)) return json(response, 405, { ok: false, error: '只支持 GET' })
+    response.setHeader('Cache-Control', 'no-store')
+    const file = path.join(dir, 'avatar-config.json')
+    let config: unknown = {}
+    try {
+      config = JSON.parse(fs.readFileSync(file, 'utf8'))
+    } catch {
+      config = {}
+    }
+    json(response, 200, { ok: true, config: config && typeof config === 'object' ? config : {} })
   }
 }

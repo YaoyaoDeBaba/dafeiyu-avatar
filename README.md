@@ -168,7 +168,7 @@ pnpm add file:D:/dafeiyu-market/dsh-avatar
 
 ```
 n = 当前会话下 status === 'running' 的子代理数
-工地鱼个数 = min(n, 4)        // n = 0 时一个都不出
+工地鱼个数 = min(n, 4)        // n = 0 或**拿不到**时 → 一个都不出
 ```
 
 **数量来源（刻意不做轮询，2026-11-16）**：
@@ -177,12 +177,47 @@ n = 当前会话下 status === 'running' 的子代理数
 |---|---|---|
 | 1 | SSE `GET /api/dsh-remote-dafeiyu/subagents/stream`，帧体是轻量快照 `{ s: { 父会话id: [总数, 在跑数] } }` | 一条长连接，宿主**按变化推送并去重**，稳态零请求 |
 | 2 | 进入 `running` 时补一次 `GET /subagents?sessionId=`（**30s 节流**） | 防"刚连上还没有帧" |
-| 3 | 两者都拿不到 → `undefined` | 回落到固定 `count` 个（老行为） |
+| 3 | 两者都拿不到 → `undefined` | **不显示**（0.3.0 曾回落成固定 2 个，已按反馈改掉） |
+
+**主动刷新**（都是一次性请求，不是轮询）：
+
+| 触发 | 行为 |
+|---|---|
+| 点小窗菜单的「派活助手」 | 立即重算工地鱼个数（绕过 30s 节流） |
+| 宿主派发 `dafeiyu:subagents-opened` | 同上（宿主想接就接） |
+| `window.__dafeiyuAvatarRefresh()` | 同上（控制台/其它脚本可调） |
 
 > 历史教训：面板曾经"推送一次 → 全量拉一次"，等于 2.5 次/秒的列表请求，把 DSH 拖慢过。
 > 这里**只消费宿主已经推好的快照**，不再周期性拉全量。
 
 SSE 只在 `status === 'running'` 期间保持，回到 idle 立刻关闭（`dispose()` 里也会关）。
+
+### 4.3 行为表（外置，改文件即生效）
+
+三层覆盖，后者覆盖前者：
+
+```
+DEFAULT_BEHAVIOR（代码里的默认值）
+  ← <avatarDir>/avatar-config.json   ← 宿主路由 GET /avatar/config，只取一次
+  ← window.__dafeiyuAvatarConfig.behaviors  ← 控制台临时调，每次都现读
+```
+
+示例见 [`docs/avatar-config.example.json`](docs/avatar-config.example.json)，字段含义：
+
+| 字段 | 含义 | 默认 |
+|---|---|---|
+| `height` | 显示高度 px（宽度按格子宽高比算） | 96 |
+| `moveSpeed` | 移动速度 px/s（跑多远 → 动画多久） | 34 |
+| `minMoveMs` / `maxMoveMs` | 单次跑动时长夹取 | 1400 / 3200 |
+| `workMs` | 停下手干活的时长区间 | 3500~6000 |
+| `workChance` | 到点后干活（而不是继续跑）的概率 | 0.55 |
+| `idleMs` | 两次行为之间的静止间隔 | 1600~3400 |
+| `offsetXRange` / `offsetYRange` | 相对母体的游走半径（px） | 44~114 / 4~14 |
+| `workClips` / `runClip` / `idleClip` | 干活动作池 / 跑动 / 站定（张望） | 见示例 |
+
+文件不存在、JSON 写坏、字段非法 → 一律回落默认值（**不许把"配置写坏了"变成"形象不动了"**）。
+`GET /avatar/config` 有 5 条判据（正常/缺失/坏 JSON/405/403）。
+
 
 
 ### 4.2 运行时开关
@@ -296,12 +331,16 @@ npm run check:assets   # 素材体检（对着真实 avatar 目录）
 
 ## 7. 版本
 
-- `0.3.0` — 工地鱼数量改为**按在跑的子代理数**（封顶 4，0 个就不出）。数据走宿主 SSE 的轻量快照
-  `{ s: { 父会话: [总数, 在跑数] } }`，**不做周期性全量轮询**；只在进入 running 时补一次
-  `GET /subagents`（30s 节流）兜底，拿不到才回落固定 `count`。
-- `0.2.1` — 修实机四条反馈：
-  ① 翻转改**瞬时**（`transform` 不进 transition）；
-  ② **干活时不再漂移**：切动作前先按 `getComputedStyle().left` 把当前位置落定，干活期间 `left` 无过渡；
-  ③ **跟随母体时切回跑路**（0.35s 急行过渡），不再"边干活边被拖"；
-  ④ 位置模型改成**相对母体锚点的偏移**（`offsetX/offsetY`）：跟随不改偏移、wander 也只改偏移，跟完之后不会被拉回原起点。
-- `0.2.0` — 工地鱼空间行为
+- `0.4.0` — 四件事：
+  ① **工地鱼个数不再兜底显示**：拿不到"在跑的子代理数"就一个都不出（此前回落成 2 个）；
+  ② **修"原地走路"**：跑动动作只在真的在动的那段时间播（按时长 = 距离/速度），到位后切
+     `idleClip`（张望）；新生成的工人也不再"先站着跑"，而是先出现再跑出去；跟随时被打断的
+     工人在母体停下后自动切回站定；
+  ③ **主动刷新**：点「派活助手」/ 宿主派发 `dafeiyu:subagents-opened` / `window.__dafeiyuAvatarRefresh()`
+     都会立刻重算个数（一次性请求，不是轮询）；
+  ④ **行为表外置**：`<avatarDir>/avatar-config.json`（宿主路由 `GET /avatar/config`，只取一次）
+     + `window.__dafeiyuAvatarConfig.behaviors` 覆盖；新增 `render/behavior.ts` 与 11 条判据。
+- `0.3.0` — 工地鱼数量按在跑的子代理数（封顶 4）；SSE 快照取数，不做轮询。
+- `0.2.1` — 修实机四条反馈（瞬时翻转 / 干活不漂移 / 跟随时跑路 / 偏移量模型）。
+- `0.2.0` — 工地鱼空间行为：前后层、按方向翻转、跟随母体。
+- `0.1.0` — 从 `dsh-remote-dafeiyu@0.9.0-dafeiyu.83` 拆出。

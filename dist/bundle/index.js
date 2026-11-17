@@ -116,6 +116,7 @@ var AVATAR_BASE = "/api/dsh-remote-dafeiyu/avatar";
 var AVATAR_MANIFEST_ROUTE = `${AVATAR_BASE}/manifest`;
 var AVATAR_SHEET_ROUTE = `${AVATAR_BASE}/sheet`;
 var AVATAR_STATE_ROUTE = `${AVATAR_BASE}/state`;
+var AVATAR_CONFIG_ROUTE = `${AVATAR_BASE}/config`;
 function json(response, status, body) {
   const payload = JSON.stringify(body);
   response.writeHead(status, { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(payload) });
@@ -191,6 +192,24 @@ function avatarStateHandler(getStatus) {
     json(response, 200, { ok: true, status: status === "running" ? "running" : "idle" });
   };
 }
+function avatarConfigHandler(dir) {
+  return (request, response) => {
+    applyCors(request, response);
+    if (preflight(request, response)) return;
+    const denied = rejected(request);
+    if (denied) return json(response, 403, { ok: false, error: denied });
+    if (!readonly(request)) return json(response, 405, { ok: false, error: "\u53EA\u652F\u6301 GET" });
+    response.setHeader("Cache-Control", "no-store");
+    const file = path2.join(dir, "avatar-config.json");
+    let config = {};
+    try {
+      config = JSON.parse(fs2.readFileSync(file, "utf8"));
+    } catch {
+      config = {};
+    }
+    json(response, 200, { ok: true, config: config && typeof config === "object" ? config : {} });
+  };
+}
 
 // src/host/start.ts
 function startAvatar(ctx, deps) {
@@ -207,6 +226,7 @@ function startAvatar(ctx, deps) {
     try {
       disposers.push(web.register({ kind: "exact", path: AVATAR_MANIFEST_ROUTE, handler: avatarManifestHandler(dir) }));
       disposers.push(web.register({ kind: "exact", path: AVATAR_SHEET_ROUTE, handler: avatarSheetHandler(dir) }));
+      disposers.push(web.register({ kind: "exact", path: AVATAR_CONFIG_ROUTE, handler: avatarConfigHandler(dir) }));
       disposers.push(
         web.register({
           kind: "exact",

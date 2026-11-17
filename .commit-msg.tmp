@@ -1,9 +1,16 @@
-feat(swarm): 工地鱼数量按在跑的子代理数（0.3.0）
+feat(swarm): 兜底不显示 / 修原地走路 / 主动刷新 / 行为表外置（0.4.0）
 
-- 个数 = min(在跑的子代理数, 4)；0 个就不出
-- 数据走宿主 SSE 轻量快照 { s: { 父会话: [总数, 在跑数] } }，按变化推送并去重，稳态零请求
-- 只在进入 running 时补一次 GET /subagents?sessionId=（30s 节流），防"刚连上还没帧"
-- 两者都拿不到才回落固定 count（swarmCount 的 fallback 分支）
-- SSE 只在 running 期间保持，回 idle / dispose 立刻关闭
-- 刻意不做周期性全量轮询（历史上 2.5s/次的列表请求把 DSH 拖慢过）
-- 新增 swarmCount 单测（封顶 / 取整 / 负数 / NaN / fallback 也封顶），共 20 项
+① 个数不再兜底：拿不到"在跑的子代理数"就一个工地鱼都不出（此前回落成 2 个）
+② 修"原地走路"：
+   - 跑动只在真的在动的那段时间播，时长 = 距离 / moveSpeed（夹在 min/maxMoveMs）
+   - 到位后切 idleClip（张望），不再"跑动动画 + 静止"
+   - 新生成的工人先出现（idleClip）再跑出去，不再"刚出现就原地跑"
+   - 跟随母体被打断的工人，在母体停下后自动切回站定（followRun 标记）
+   - 去掉并行的 wander 定时器（两套调度会互相打架）
+③ 主动刷新工地鱼数量：点「派活助手」/ 宿主派发 dafeiyu:subagents-opened /
+   window.__dafeiyuAvatarRefresh() —— 一次性请求，绕过 30s 节流，仍不做轮询
+④ 行为表外置：<avatarDir>/avatar-config.json（新路由 GET /avatar/config，只取一次）
+   + window.__dafeiyuAvatarConfig.behaviors 覆盖；新增 render/behavior.ts
+
+测试：新增 behavior（6 条）+ config 路由（5 条），共 31 项
+文档：README 4.2/4.3 + docs/avatar-config.example.json

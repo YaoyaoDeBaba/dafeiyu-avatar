@@ -18,6 +18,7 @@
  */
 import { ClipPacer, type AvatarPool, type ClipSpec, type FrameView } from '../render/playback.js'
 import { workerLeft, facingFor, depthFor, swarmCount, WORK_SWARM_MAX } from '../render/layout.js'
+import { DEFAULT_BEHAVIOR, mergeBehavior, moveDuration, pickIn, shouldWork, type SwarmBehavior } from '../render/behavior.js'
 import { resolveHostUrl } from './host-url.js'
 
 type AvatarStateView = {
@@ -181,7 +182,11 @@ export function mountAvatarWidget(deps: AvatarWidgetDeps): () => void {
     })
     menu.appendChild(button)
   }
-  addMenuButton('🐝', '派活助手', () => deps.onMenuAction?.('subagents'))
+  addMenuButton('🐝', '派活助手', () => {
+    deps.onMenuAction?.('subagents')
+    // 用户主动打开派活助手 ⇒ 立刻重算工地鱼个数（不等下一次 SSE / 也不靠轮询）
+    refreshWorkersNow()
+  })
   addMenuButton('☁️', '小云雀', () => deps.onMenuAction?.('xyq'))
   addMenuButton('🐳', '肥鱼识图', () => deps.onMenuAction?.('vision'))
   addMenuButton('🐟', '一键转生', () => deps.onMenuAction?.('rebirth'))
@@ -471,8 +476,14 @@ export function mountAvatarWidget(deps: AvatarWidgetDeps): () => void {
     /** 正在干活（螺丝/砌砖/张望）——此时**不许平移**。 */
     working: boolean
     workTimer?: ReturnType<typeof setTimeout>
+    /** 跑动到位的那一刻（到位后决定干活还是站着）。 */
+    arriveTimer?: ReturnType<typeof setTimeout>
+    /** 站定期间的下一次决策。 */
+    stepTimer?: ReturnType<typeof setTimeout>
     /** 跟随母体期间的"急行"截止时刻：这段时间用短过渡，否则会严重滞后。 */
     rushUntil: number
+    /** 当前是因为"跟着母体跑"才在播跑动（母体停下就要切回站定）。 */
+    followRun?: boolean
     frame: number
     anchorX: number
     anchorY: number
@@ -497,7 +508,7 @@ export function mountAvatarWidget(deps: AvatarWidgetDeps): () => void {
   }
   const swarmConfig = (): SwarmConfig => {
     const raw = (globalThis as Record<string, unknown>).__dafeiyuAvatarConfig as
-      | { workers?: Partial<SwarmConfig> }
+      | { workers?: Partial<SwarmConfig>; behaviors?: unknown }
       | undefined
     const cfg = raw?.workers ?? {}
     return {
@@ -508,6 +519,38 @@ export function mountAvatarWidget(deps: AvatarWidgetDeps): () => void {
       follow: cfg.follow !== false,
       followSubagents: cfg.followSubagents !== false,
     }
+  }
+
+  /* ── 行为表（三层覆盖：默认 ← avatar-config.json ← window 覆盖） ── */
+
+  let fileBehavior: unknown = undefined
+  let behaviorLoaded = false
+
+  /** 当前生效的行为表。窗口覆盖每次现读（控制台改完立刻生效，不用重启）。 */
+  const currentBehavior = (): SwarmBehavior => {
+    const raw = (globalThis as Record<string, unknown>).__dafeiyuAvatarConfig as { behaviors?: unknown } | undefined
+    let merged = mergeBehavior(DEFAULT_BEHAVIOR, fileBehavior)
+    if (raw?.behaviors !== undefined) merged = mergeBehavior(merged, raw.behaviors)
+    return merged
+  }
+
+  /**
+   * 读一次 `<avatarDir>/avatar-config.json`（**只取一次，不是轮询**）。
+   * 宿主没有这条路由（版本旧）或文件不存在都静默走默认值。
+   */
+  const loadBehaviorFile = (): void => {
+    if (behaviorLoaded) return
+    behaviorLoaded = true
+    void (async () => {
+      try {
+        const response = await fetch(resolveHostUrl(`${BASE}/config`), { signal: AbortSignal.timeout(3000) })
+        if (!response.ok) return
+        const answer = (await response.json()) as { config?: unknown }
+        if (answer.config !== undefined && answer.config !== null) fileBehavior = answer.config
+      } catch {
+        /* 走默认 */
+      }
+    })()
   }
 
   /** 取元素矩形；假 DOM（单测环境）没有 getBoundingClientRect 时回落成 0 矩形。 */
@@ -563,9 +606,9 @@ export function mountAvatarWidget(deps: AvatarWidgetDeps): () => void {
     // 容器必须按"格子宽高比"定尺寸，否则每个动作的格子比例不同 → 小人被拉伸
     const width =
       state.cellWidth > 0 && state.cellHeight > 0
-        ? Math.round((WORK_SWARM_HEIGHT * state.cellWidth) / state.cellHeight)
-        : Math.round(WORK_SWARM_HEIGHT * 0.75)
-    worker.height = WORK_SWARM_HEIGHT
+        ? Math.round((currentBehavior().height * state.cellWidth) / state.cellHeight)
+        : Math.round(currentBehavior().height * 0.75)
+    worker.height = currentBehavior().height
     worker.width = width
     worker.node.style.height = `${worker.height}px`
     worker.node.style.width = `${width}px`
@@ -575,20 +618,6 @@ export function mountAvatarWidget(deps: AvatarWidgetDeps): () => void {
     worker.frame = 0
     worker.meta = { cols: state.cols, rows: state.rows, frames: state.frames }
     applyWorkerGeometry(worker)
-  }
-
-  /** 跑路：切回 worker_run，并把偏移挪一段（<1px 不改朝向，防抖）。 */
-  const runTo = (worker: SwarmWorker, deltaX: number): void => {
-    const nextX = worker.offsetX + deltaX
-    worker.facing = facingFor(worker.offsetX, nextX, worker.facing)
-    worker.offsetX = Math.max(-160, Math.min(160, nextX))
-    if (worker.working) {
-      // 打断干活：清掉待恢复的定时器
-      if (worker.workTimer) clearTimeout(worker.workTimer)
-      worker.workTimer = undefined
-      worker.working = false
-    }
-    setWorkerClip(worker, 'worker_run')
   }
 
   /** 读元素"当前视觉位置"的 left（过渡进行中的瞬时值），读不到就当没有。 */
@@ -605,10 +634,69 @@ export function mountAvatarWidget(deps: AvatarWidgetDeps): () => void {
     }
   }
 
+  /**
+   * 跑动：**按距离算时长**，跑完自动落到"站定/干活"。
+   *
+   * 这条是"原地跑步"的修法：跑动动作只在**真的在动**的那段时间播，
+   * 到位之后立刻换成 `idleClip`（张望）——所以不会再出现"动画在跑、人不动"。
+   */
+  const runTo = (worker: SwarmWorker, targetOffsetX: number): void => {
+    if (!worker.node.isConnected) return
+    const distance = targetOffsetX - worker.offsetX
+    const behavior = currentBehavior()
+    if (Math.abs(distance) < 2) {
+      // 太近就别"跑"了，直接站着，下一轮再说
+      standStill(worker)
+      return
+    }
+    if (worker.workTimer) clearTimeout(worker.workTimer)
+    worker.workTimer = undefined
+    worker.working = false
+    worker.facing = facingFor(worker.offsetX, targetOffsetX, worker.facing)
+    worker.offsetX = targetOffsetX
+    setWorkerClip(worker, behavior.runClip)
+    // 过渡时长与距离匹配（moveDuration），跑多远就走多久
+    const duration = moveDuration(distance, behavior)
+    worker.node.style.transition = `left ${duration}ms linear, top .3s ease, opacity .4s ease`
+    applyWorkerGeometry(worker)
+    worker.arriveTimer = setTimeout(() => {
+      if (!worker.node.isConnected) return
+      if (shouldWork(currentBehavior())) startWork(worker)
+      else standStill(worker)
+    }, duration)
+  }
+
+  /** 站定：播"张望"这类不动动作，隔一会儿再决定下一步。 */
+  const standStill = (worker: SwarmWorker): void => {
+    if (!worker.node.isConnected || worker.working) return
+    const behavior = currentBehavior()
+    setWorkerClip(worker, behavior.idleClip)
+    scheduleNext(worker, behavior)
+  }
+
+  /** 下一次行为：歇一会儿，然后要么干活、要么跑到新位置。 */
+  const scheduleNext = (worker: SwarmWorker, behavior = currentBehavior()): void => {
+    if (worker.stepTimer) clearTimeout(worker.stepTimer)
+    worker.stepTimer = setTimeout(() => {
+      worker.stepTimer = undefined
+      if (!worker.node.isConnected) return
+      if (worker.working) return
+      if (shouldWork(behavior)) {
+        startWork(worker)
+        return
+      }
+      const [low, high] = behavior.offsetXRange
+      const magnitude = pickIn([low, high])
+      const target = (Math.random() < 0.5 ? -1 : 1) * magnitude
+      runTo(worker, target)
+    }, pickIn(behavior.idleMs))
+  }
+
   /** 原地干活：期间**完全不动**（先把当前视觉位置落定，再贴一次且 left 无过渡）。 */
   const startWork = (worker: SwarmWorker): void => {
-    if (worker.working) return
-    // 上一次"跑动"的 2.6s 过渡可能还没走完：先按当前视觉位置反推 offset，
+    if (worker.working || !worker.node.isConnected) return
+    const behavior = currentBehavior()
+    // 上一次"跑动"的过渡可能还没走完：先按当前视觉位置反推 offset，
     // 否则切到电钻/搬砖时人还在继续滑（用户报的"原地漂移"就是这个）。
     const left = visualLeft(worker)
     if (left !== undefined) {
@@ -616,15 +704,22 @@ export function mountAvatarWidget(deps: AvatarWidgetDeps): () => void {
       const effective = worker.facing === 1 ? worker.anchorX : 1 - worker.anchorX
       worker.offsetX = left + effective * worker.width - anchor.x
     }
+    if (worker.arriveTimer) clearTimeout(worker.arriveTimer)
+    worker.arriveTimer = undefined
     worker.working = true
-    setWorkerClip(worker, WORK_SWARM_CLIPS[Math.floor(Math.random() * WORK_SWARM_CLIPS.length)] ?? 'worker_run')
+    const pool = behavior.workClips.filter((id) => states.some((row) => row.id === id))
+    const clip = pool[Math.floor(Math.random() * pool.length)] ?? behavior.idleClip
+    setWorkerClip(worker, clip)
     worker.workTimer = setTimeout(() => {
       if (!worker.node.isConnected) return
       worker.working = false
       worker.workTimer = undefined
-      setWorkerClip(worker, 'worker_run')
-    }, 3500 + Math.random() * 2500)
+      // 干完立刻跑开（否则会出现"站着播跑动"的原地走路）
+      setWorkerClip(worker, behavior.runClip)
+      scheduleNext(worker, behavior)
+    }, pickIn(behavior.workMs))
   }
+
 
   const spawnWorker = (): void => {
     const cfg = swarmConfig()
@@ -638,39 +733,43 @@ export function mountAvatarWidget(deps: AvatarWidgetDeps): () => void {
 
     const worker: SwarmWorker = {
       node,
-      offsetX: dir * (44 + Math.random() * 70),
-      offsetY: 4 + Math.random() * 10,
+      // 先出现在母体附近（约 20px），再"跑"到工作位置——这样第一段动画就是真跑动，
+      // 不会出现"刚生成就原地跑步"（0.3.2 修）。
+      offsetX: dir * 20,
+      offsetY: pickIn(currentBehavior().offsetYRange),
       facing: dir === -1 ? -1 : 1,
       working: false,
       rushUntil: 0,
       frame: 0,
       anchorX: 0.5,
       anchorY: 0.992,
-      width: Math.round(WORK_SWARM_HEIGHT * 0.75),
-      height: WORK_SWARM_HEIGHT,
+      width: Math.round(currentBehavior().height * 0.75),
+      height: currentBehavior().height,
     }
     swarm.push(worker)
-    setWorkerClip(worker, 'worker_run')
+    // 站定姿态起步（不是跑动姿态）
+    setWorkerClip(worker, currentBehavior().idleClip)
     requestAnimationFrame(() => {
       node.style.opacity = '0.95'
     })
 
-    const wander = (): void => {
+    // 行为链：跑出去 → 到位后（干活 | 站定）→ 隔一会儿再来一轮。
+    // 不再用一个并行的 wander 定时器（两套调度会互相打架，也会让"跑动/站定"错位）。
+    worker.stepTimer = setTimeout(() => {
+      worker.stepTimer = undefined
       if (!node.isConnected) return
-      setTimeout(() => {
-        if (!node.isConnected) return
-        if (Math.random() < 0.55) startWork(worker)
-        else runTo(worker, (Math.random() < 0.5 ? -1 : 1) * (20 + Math.random() * 40))
-        wander()
-      }, 2400 + Math.random() * 2600)
-    }
-    wander()
+      runTo(worker, dir * pickIn(currentBehavior().offsetXRange))
+    }, 120)
   }
 
   /** 淡出后移除（任务结束那一瞬不突兀）。 */
   const retireWorker = (worker: SwarmWorker): void => {
     if (worker.workTimer) clearTimeout(worker.workTimer)
     worker.workTimer = undefined
+    if (worker.arriveTimer) clearTimeout(worker.arriveTimer)
+    worker.arriveTimer = undefined
+    if (worker.stepTimer) clearTimeout(worker.stepTimer)
+    worker.stepTimer = undefined
     try {
       worker.node.style.opacity = '0'
       setTimeout(() => {
@@ -775,8 +874,36 @@ export function mountAvatarWidget(deps: AvatarWidgetDeps): () => void {
       if (answer.ok !== true || !Array.isArray(answer.items)) return
       runningSubagents = answer.items.filter((row) => row.status === 'running').length
     } catch {
-      /* 拿不到就保持 undefined → 回落固定个数 */
+      /* 拿不到就保持 undefined → 不显示工地鱼 */
     }
+  }
+
+  /**
+   * 手动刷新一次工地鱼数量（**用户主动动作**，绕过 30s 节流）。
+   *
+   * 触发点：
+   *   1. 点小窗菜单里的「派活助手」；
+   *   2. 宿主/其它代码派发 `dafeiyu:subagents-opened`（面板被打开）；
+   *   3. 控制台调 `window.__dafeiyuAvatarRefresh()`。
+   * 都只发**一次**请求，不做定时轮询。
+   */
+  const refreshWorkersNow = (): void => {
+    const session = deps.getCurrentSession?.()
+    if (session === undefined || session === null) return
+    subagentFetchAt = 0
+    void (async () => {
+      await fetchRunningOnce(session)
+      const cfg = swarmConfig()
+      syncWorkers(cfg.followSubagents ? swarmCount(runningSubagents, 0) : cfg.count)
+    })()
+  }
+
+  ;(globalThis as Record<string, unknown>).__dafeiyuAvatarRefresh = refreshWorkersNow
+  const onSubagentsOpened = (): void => refreshWorkersNow()
+  try {
+    globalThis.addEventListener('dafeiyu:subagents-opened', onSubagentsOpened)
+  } catch {
+    /* ignore */
   }
 
 
@@ -809,18 +936,30 @@ export function mountAvatarWidget(deps: AvatarWidgetDeps): () => void {
       previous !== undefined &&
       (Math.abs(rect.left - previous.left) > 0.5 || Math.abs(rect.top - previous.top) > 0.5)
     lastMainRect = { left: rect.left, top: rect.top, width: rect.width, height: rect.height }
-    if (!moved) return
+
+    // 母体停下：被"跟着跑"打断的工人切回站定，避免停下后还在原地跑步
+    if (!moved) {
+      for (const worker of swarm) {
+        if (worker.followRun === true && worker.working !== true) {
+          worker.followRun = false
+          standStill(worker)
+        }
+      }
+      return
+    }
 
     if (cfg.follow) {
+      const behavior = currentBehavior()
       for (const worker of swarm) {
         // 跟随期间用短过渡（否则 2.6s 的线性过渡会严重滞后）
         worker.rushUntil = Date.now() + 600
-        // 跟着走 = 跑路：打断干活，切回 worker_run
+        // 跟着走 = 跑路：打断干活，切回跑动
         if (worker.working) {
           if (worker.workTimer) clearTimeout(worker.workTimer)
           worker.workTimer = undefined
           worker.working = false
-          setWorkerClip(worker, 'worker_run')
+          worker.followRun = true
+          setWorkerClip(worker, behavior.runClip)
           continue
         }
         applyWorkerGeometry(worker)
@@ -886,7 +1025,9 @@ export function mountAvatarWidget(deps: AvatarWidgetDeps): () => void {
           runningSubagents = undefined
         }
         const swarmCfg = swarmConfig()
-        syncWorkers(swarmCfg.followSubagents ? swarmCount(runningSubagents, swarmCfg.count) : swarmCfg.count)
+        // 拿不到"在跑的子代理数"就**一个都不出**（0.3.0 之前回落成固定 2 个，
+        // 结果是什么都没在跑的时候也有两个工人在晃，用户明确要求改成不显示）。
+        syncWorkers(swarmCfg.followSubagents ? swarmCount(runningSubagents, 0) : swarmCfg.count)
         if (Date.now() < pokeUntil) {
           wrap.hidden = false
           return
@@ -901,6 +1042,8 @@ export function mountAvatarWidget(deps: AvatarWidgetDeps): () => void {
     })()
   }
 
+  // 行为表只取一次（不是轮询）：<avatarDir>/avatar-config.json，没有就用默认值
+  loadBehaviorFile()
   void (async () => {
     try {
       const response = await fetch(resolveHostUrl(`${BASE}/manifest?t=${Date.now()}`), {
@@ -979,6 +1122,16 @@ export function mountAvatarWidget(deps: AvatarWidgetDeps): () => void {
   const dispose = (): void => {
     disposed = true
     closeSubagentStream()
+    try {
+      globalThis.removeEventListener('dafeiyu:subagents-opened', onSubagentsOpened)
+    } catch {
+      /* ignore */
+    }
+    try {
+      delete (globalThis as Record<string, unknown>).__dafeiyuAvatarRefresh
+    } catch {
+      /* ignore */
+    }
     drag = undefined
     if (timer) clearInterval(timer)
     if (pollTimer) clearInterval(pollTimer)
