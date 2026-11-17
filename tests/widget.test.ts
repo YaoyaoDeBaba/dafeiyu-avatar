@@ -37,6 +37,8 @@ interface Scenario {
   failEvery?: number
   /** 虚拟时长。 */
   durationMs: number
+  /** 页面是不是在后台（2026-11-17：后台不许画、不许轮询）。 */
+  hidden?: boolean
 }
 
 const MANIFEST_STATES = ['idle', 'nap', 'eat', 'talk', 'dance', 'tsundere', 'think', 'sneak'].map((id) => ({
@@ -53,7 +55,9 @@ const MANIFEST_STATES = ['idle', 'nap', 'eat', 'talk', 'dance', 'tsundere', 'thi
 }))
 
 /** 跑一段场景，返回"可见格上出现过的每一帧"的序列。 */
-async function run(scenario: Scenario): Promise<{ samples: Sample[]; liveTimers: number; createdTimers: number; bundle: string }> {
+async function run(
+  scenario: Scenario,
+): Promise<{ samples: Sample[]; liveTimers: number; createdTimers: number; bundle: string; stateHits: number }> {
   const esbuild = (await import('esbuild')) as {
     build: (options: Record<string, unknown>) => Promise<{ outputFiles?: Array<{ text: string }> }>
   }
@@ -135,6 +139,8 @@ async function run(scenario: Scenario): Promise<{ samples: Sample[]; liveTimers:
     createElement: (tag: string) => new El(tag),
     getElementById: () => null,
     querySelectorAll: () => [],
+    hidden: scenario.hidden === true,
+    visibilityState: scenario.hidden === true ? 'hidden' : 'visible',
     addEventListener: () => {},
     removeEventListener: () => {},
   }
@@ -244,7 +250,7 @@ async function run(scenario: Scenario): Promise<{ samples: Sample[]; liveTimers:
 
   const liveTimers = timers.length
   mount()
-  return { samples, liveTimers, createdTimers, bundle }
+  return { samples, liveTimers, createdTimers, bundle, stateHits }
 }
 
 /** 把样本切成"一支片一段"，并断言每段都是完整的 48 帧（8×6 行优先全覆盖）。 */
@@ -313,6 +319,21 @@ test('高频状态轮询 + 一半请求失败：索引不回 0，段长不变', 
   assert.ok(parts.length <= 8, `轮询不该把播片切碎：20s 切了 ${parts.length} 段`)
   assert.equal(liveTimers, 2, `轮询失败/高频不许新建常驻节拍，实际 ${liveTimers}`)
   assert.equal(createdTimers, 2, `节拍只该在挂载时创建一次，实际创建了 ${createdTimers} 个`)
+})
+
+test('页面在后台（hidden）：不画、不轮询（没人看的画面不值得烧 CPU）', async () => {
+  // 2026-11-17 真机反馈"DSH 开着就一直在跑"：这颗形象原来是 24fps 画 + 2.5 秒轮询，
+  // 永不暂停。桌面端不像浏览器那样把后台定时器压到 1Hz，所以必须自己停。
+  const { samples, liveTimers, createdTimers, stateHits } = await run({
+    status: 'running',
+    durationMs: 12_000,
+    hidden: true,
+  })
+  assert.equal(samples.length, 0, `后台不该产生任何可见帧，实际画了 ${samples.length} 帧`)
+  assert.equal(stateHits, 1, `后台不该再发状态轮询（只允许挂载时那一次），实际 ${stateHits} 次`)
+  // 停的是"拍里的动作"，不是"表"：节拍照旧只有画面 + 轮询两个，别把它建成条件定时器
+  assert.equal(liveTimers, 2, `后台时仍应只有两个常驻节拍，实际 ${liveTimers}`)
+  assert.equal(createdTimers, 2, `节拍不许随可见性重建，实际创建了 ${createdTimers} 个`)
 })
 
 test('模块图里没有同步 IO：形象脚本不许 require node: 内建', async () => {

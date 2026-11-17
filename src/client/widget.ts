@@ -37,6 +37,13 @@ type AvatarStateView = {
 
 const BASE = '/api/dsh-remote-dafeiyu/avatar'
 const FPS = 24
+/**
+ * 状态轮询周期（2026-11-17：2500 → 5000）。
+ *
+ * 这个请求只回答"宿主有没有任务在跑"——秒级精度没有意义，而它原来是一天 24000 发。
+ * 5 秒 + 后台不轮询（见 `isHidden`），常驻开销降到原来的 1/4 以下。
+ */
+const POLL_MS = 5_000
 const WIDGET_WIDTH = 132
 /** 舞台高度：与 CSS 的 aspect-ratio: 3/4 保持一致。 */
 const STAGE_HEIGHT = Math.round((WIDGET_WIDTH * 4) / 3)
@@ -227,6 +234,27 @@ export function mountAvatarWidget(deps: AvatarWidgetDeps): () => void {
   let bossCooldownUntil = 0
   let lastClipId: string | undefined
   let manifestVersion = 0
+
+  /**
+   * 页面是不是在后台（2026-11-17 性能修复）。
+   *
+   * 原来这颗悬浮形象是 **24fps 画 + 2.5 秒轮询，永不暂停**：DSH 开着一天，就是一天
+   * 24 次/秒的样式写（`paintWorkers` 每拍改 `backgroundPosition`）+ 每 8 拍一次强制 reflow
+   * （那里读 `rectOf(wrap)`），外加 24000 次/天的状态轮询。桌面端（Electron）不像浏览器那样
+   * 把后台定时器压到 1Hz，所以**必须自己停**——没人看的画面不值得烧 CPU。
+   *
+   * 判据口径：`document.hidden` 优先，退到 `visibilityState === 'hidden'`；
+   * 假 DOM（测试夹具）里两者都没有 ⇒ 一律当"可见"，行为与改之前完全一致。
+   */
+  const isHidden = (): boolean => {
+    try {
+      const d = (globalThis as { document?: { hidden?: boolean; visibilityState?: string } }).document
+      if (d?.hidden === true) return true
+      return d?.visibilityState === 'hidden'
+    } catch {
+      return false
+    }
+  }
 
   const assetStatus = new Map<string, 'loading' | 'ready' | 'failed'>()
   const assetUrl = (state: AvatarStateView): string =>
@@ -1113,15 +1141,35 @@ export function mountAvatarWidget(deps: AvatarWidgetDeps): () => void {
   // 一个 24fps 的节拍就够：换片由"帧画满了"驱动（pacer），不再要第二个 400ms 的墙钟定时器。
   // 掉拍（主线程被别的模块占用 / 窗口被 throttle）只会让动画播得慢一点。
   timer = setInterval(() => {
+    // 后台不画：动画没人看，别烧 CPU（见 isHidden 那段）。
+    if (disposed || isHidden()) return
     if (playing) paint()
     paintWorkers()
   }, Math.round(1000 / FPS))
-  pollTimer = setInterval(refresh, 2500)
+  pollTimer = setInterval(() => {
+    if (disposed || isHidden()) return
+    refresh()
+  }, POLL_MS)
+  // 切回前台立刻补一拍：状态可能是后台那几分钟里变的，别等 5 秒。
+  const onVisibility = (): void => {
+    if (disposed || isHidden()) return
+    refresh()
+  }
+  try {
+    doc.addEventListener('visibilitychange', onVisibility)
+  } catch {
+    /* 没有这个事件的老 DOM 就算了：轮询自己会补上 */
+  }
   refresh()
 
   const dispose = (): void => {
     disposed = true
     closeSubagentStream()
+    try {
+      doc.removeEventListener('visibilitychange', onVisibility)
+    } catch {
+      /* ignore */
+    }
     try {
       globalThis.removeEventListener('dafeiyu:subagents-opened', onSubagentsOpened)
     } catch {
