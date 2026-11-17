@@ -851,8 +851,17 @@ export function mountAvatarWidget(deps: AvatarWidgetDeps): () => void {
     if (session === undefined || session === null) return
     try {
       const parsed = JSON.parse(raw) as { s?: Record<string, [number, number]> }
-      const row = parsed.s?.[session]
-      runningSubagents = Array.isArray(row) ? (typeof row[1] === 'number' ? row[1] : 0) : 0
+      const map = parsed.s
+      if (map === undefined || map === null) return
+      // 快照里**没有这个会话**：宿主的追踪表里没它（≠"有 0 个子代理"）。
+      // 与宿主面板的判断保持一致——没键就不动，避免把已知的 n 抹成 0 再撤掉工人。
+      if (!Object.prototype.hasOwnProperty.call(map, session)) return
+      const row = map[session]
+      if (!Array.isArray(row)) return
+      runningSubagents = typeof row[1] === 'number' && Number.isFinite(row[1]) ? Math.max(0, row[1]) : 0
+      // 帧到了就立刻对账，不等下一次 2.5s 的状态轮询（否则会有明显的滞后感）
+      const cfg = swarmConfig()
+      syncWorkers(cfg.followSubagents ? swarmCount(runningSubagents, 0) : cfg.count)
     } catch {
       /* 帧体不是我们认得的形状：保持上一次的值 */
     }
@@ -873,6 +882,11 @@ export function mountAvatarWidget(deps: AvatarWidgetDeps): () => void {
           return
         }
         applySnapshot(event.data)
+      }
+      // EventSource 自己会重连；这里只在"断了"时补一次全量，避免长期没有帧导致计数僵死
+      stream.onerror = () => {
+        const session = deps.getCurrentSession?.()
+        if (session !== undefined && session !== null) setTimeout(() => void fetchRunningOnce(session), 5000)
       }
       subagentStream = stream
     } catch {
@@ -1043,18 +1057,25 @@ export function mountAvatarWidget(deps: AvatarWidgetDeps): () => void {
             bossCooldownUntil = Date.now() + BOSS_COOLDOWN_MS
           }
         }
-        // 有任务在跑 → 工地鱼按"在跑的子代理数"出动（封顶 4）；跑完自动收工。
-        // 数量来源见上方「在跑的子代理数」：SSE 推送为主，进入 running 时补一次全量。
-        if (status === 'running') {
-          ensureSubagentStream()
-          if (runningSubagents === undefined) void fetchRunningOnce(session)
-        } else {
-          closeSubagentStream()
-          runningSubagents = undefined
+        /*
+         * 工地鱼数量：**SSE 常开**（不再随 running/idle 开关）。
+         *
+         * 2026-11-17 修（用户报"只有打开派活助手才出现工地鱼"）：
+         * 原先是 status 变 idle 就 `runningSubagents = undefined` + 关流，
+         * 于是每次状态抖一下就丢掉计数；再想恢复时又被 30s 节流挡住，
+         * 期间 syncWorkers(0) 把工人全部撤掉 —— 表现就是"关掉面板工人就没了"。
+         * 现在：流常开、计数只由帧/主动拉更新，父代理状态不再参与工地鱼数量的决定。
+         */
+        ensureSubagentStream()
+        if (justStarted) {
+          // 进入 running 这一拍强制补一次（不受 30s 节流）：刚连上可能还没有帧
+          subagentFetchAt = 0
+          void fetchRunningOnce(session)
+        } else if (runningSubagents === undefined) {
+          void fetchRunningOnce(session)
         }
         const swarmCfg = swarmConfig()
-        // 拿不到"在跑的子代理数"就**一个都不出**（0.3.0 之前回落成固定 2 个，
-        // 结果是什么都没在跑的时候也有两个工人在晃，用户明确要求改成不显示）。
+        // 拿不到"在跑的子代理数"就**一个都不出**；能拿到就严格按它（封顶 4）。
         syncWorkers(swarmCfg.followSubagents ? swarmCount(runningSubagents, 0) : swarmCfg.count)
         if (Date.now() < pokeUntil) {
           wrap.hidden = false
