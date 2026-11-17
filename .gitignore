@@ -7,3 +7,7 @@
 
 node_modules/
 *.log
+
+# 临时文件（提交信息草稿等）：曾经被 git add -A 带进仓库两次
+.commit-msg.tmp
+*.tmp

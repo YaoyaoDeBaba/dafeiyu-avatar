@@ -316,6 +316,11 @@ git push origin main
 git push origin vX.Y.Z
 ```
 
+> ⚠️ 提交信息**不要**写成仓库内的临时文件再 `git commit -F`——`git add -A` 会把草稿一起提交
+> （本仓库有过一次：`.commit-msg.tmp` 被 `76afb03` 加进去、`445ff99` 又删掉）。
+> 要写长信息就 `git commit -m "..."` 多行引号，或把草稿放到仓库外（如 `$env:TEMP`）。
+> `.gitignore` 已加 `.commit-msg.tmp` 与 `*.tmp` 兜底。
+
 > 只改 `package.json` 不打 tag 的话，仓库里看不出"哪个提交是 0.4.0"——
 > 上次就是这样漏的，之后按清单走。
 
