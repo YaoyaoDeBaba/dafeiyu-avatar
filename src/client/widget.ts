@@ -101,7 +101,7 @@ const WORK_SWARM_HEIGHT = 96
 export interface AvatarWidgetDeps {
   getCurrentSession: () => string | undefined | null
   /** 点击菜单项：派活助手 / 小云雀 / 肥鱼识图 / 转生 / 分身（入口都收在形象身上）。 */
-  onMenuAction?: (id: 'subagents' | 'xyq' | 'vision' | 'rebirth' | 'branch' | 'sprite') => void
+  onMenuAction?: (id: 'subagents' | 'xyq' | 'vision' | 'rebirth' | 'branch' | 'sprite' | 'groups') => void
 }
 
 export function mountAvatarWidget(deps: AvatarWidgetDeps): () => void {
@@ -199,6 +199,7 @@ export function mountAvatarWidget(deps: AvatarWidgetDeps): () => void {
   addMenuButton('🐟', '一键转生', () => deps.onMenuAction?.('rebirth'))
   addMenuButton('🧬', '一键分身', () => deps.onMenuAction?.('branch'))
   addMenuButton('🎞', '序列帧工具', () => deps.onMenuAction?.('sprite'))
+  addMenuButton('👥', '肥鱼拉群', () => deps.onMenuAction?.('groups'))
   addMenuButton('😤', '戳一下', () => {
     const spec = specOf(POKE_CLIP, 1)
     if (spec === undefined) return
